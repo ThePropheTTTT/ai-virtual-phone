@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { lookup } from "node:dns/promises";
 import { ProxyAgent, fetch as undiciFetch, type Dispatcher } from "undici";
 
 export const maxDuration = 120;
@@ -32,6 +33,11 @@ function isPrivateIpv4(host: string): boolean {
         || (a === 100 && b >= 64 && b <= 127);
 }
 
+/**
+ * 字符串层的快速拦截。注意这会先剥掉主机名末尾的点：`localhost.` 是 `localhost` 的
+ * 等价 FQDN 写法（DNS 解析结果相同），但字符串比较既不等于 "localhost" 也不以
+ * ".localhost" 结尾——此前正是靠这一点绕过了整条防线（`metadata.google.internal.` 同理）。
+ */
 function blockedProxyUrlReason(rawUrl: string): string | null {
     let url: URL;
     try {
@@ -42,7 +48,7 @@ function blockedProxyUrlReason(rawUrl: string): string | null {
     if (url.protocol !== "https:" && url.protocol !== "http:") {
         return "只允许 http/https URL";
     }
-    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const host = normalizeHostname(url.hostname);
     const isIpv6Literal = host.includes(":");
     const blocked = host === "localhost"
         || host.endsWith(".localhost")
@@ -53,6 +59,60 @@ function blockedProxyUrlReason(rawUrl: string): string | null {
         || (isIpv6Literal && (host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80") || host.startsWith("::ffff:")))
         || isPrivateIpv4(host);
     return blocked ? "不允许代理访问本机或内网地址" : null;
+}
+
+/** 去掉 IPv6 字面量的方括号与主机名末尾的点（FQDN 根点）。 */
+function normalizeHostname(rawHostname: string): string {
+    return rawHostname
+        .toLowerCase()
+        .replace(/^\[|\]$/g, "")
+        .replace(/\.+$/, "");
+}
+
+function isBlockedResolvedAddress(address: string): boolean {
+    const normalized = normalizeHostname(address);
+    if (normalized.includes(":")) {
+        // IPv4-mapped IPv6（::ffff:127.0.0.1）按 v4 再判一次
+        if (normalized.startsWith("::ffff:")) {
+            return isBlockedResolvedAddress(normalized.slice("::ffff:".length));
+        }
+        return normalized === "::1"
+            || normalized === "::"
+            || normalized.startsWith("fc")
+            || normalized.startsWith("fd")
+            || normalized.startsWith("fe80");
+    }
+    return isPrivateIpv4(normalized);
+}
+
+/**
+ * 完整防线：先做字符串判断，再把主机名**解析成地址**逐个校验。
+ * 只比较字符串时，攻击者自己的域名可以解析到 127.0.0.1 / 169.254.169.254 而不被拦；
+ * 解析后校验把这条路径一并堵上（尾点绕过也在这里失效，因为解析结果就是本机地址）。
+ * 解析失败不拦截——那种情况下后续 fetch 同样连不上，交给它报错即可。
+ */
+async function blockedProxyUrlReasonWithDns(rawUrl: string): Promise<string | null> {
+    const stringReason = blockedProxyUrlReason(rawUrl);
+    if (stringReason) return stringReason;
+
+    let host: string;
+    try {
+        host = normalizeHostname(new URL(rawUrl).hostname);
+    } catch {
+        return "URL 格式不合法";
+    }
+    // 已经是 IP 字面量时上面的判断已覆盖，无需解析
+    if (/^[0-9.]+$/.test(host) || host.includes(":")) return null;
+
+    try {
+        const addresses = await lookup(host, { all: true });
+        if (addresses.some(entry => isBlockedResolvedAddress(entry.address))) {
+            return "不允许代理访问本机或内网地址（域名解析到内网）";
+        }
+    } catch {
+        return null;
+    }
+    return null;
 }
 
 /**
@@ -72,7 +132,7 @@ export async function POST(req: NextRequest) {
         if (!url || typeof url !== "string") {
             return NextResponse.json({ error: "Missing url" }, { status: 400 });
         }
-        const blockedReason = blockedProxyUrlReason(url);
+        const blockedReason = await blockedProxyUrlReasonWithDns(url);
         if (blockedReason) {
             return NextResponse.json({ error: blockedReason }, { status: 400 });
         }
@@ -167,7 +227,7 @@ export async function POST(req: NextRequest) {
                     if (!msgUrl.searchParams.has(k)) msgUrl.searchParams.set(k, v);
                 }
                 // endpointPath 来自远端响应,可能是指向内网的绝对 URL,再拦一次
-                const msgBlockedReason = blockedProxyUrlReason(msgUrl.toString());
+                const msgBlockedReason = await blockedProxyUrlReasonWithDns(msgUrl.toString());
                 if (msgBlockedReason) {
                     reader.cancel().catch(() => {});
                     return NextResponse.json({ error: `SSE endpoint ${msgBlockedReason}` }, { status: 400 });

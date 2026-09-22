@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { extractCssImports, scopeSessionCSS } from "@/lib/css-scoper";
+import { extractCssImports, sanitizeCssForStyleTag, scopeSessionCSS } from "@/lib/css-scoper";
 
 /**
  * 会话自定义 CSS 注入器。
@@ -26,7 +26,8 @@ export function SessionCustomCSS({ css, scope }: { css: string; scope: string })
             {imports.map((href) => (
                 <link key={href} rel="stylesheet" href={href} precedence="default" />
             ))}
-            {scoped ? <style dangerouslySetInnerHTML={{ __html: scoped }} /> : null}
+            {/* 中和 </style 逃逸：CSS 来源含模型生成内容与导入的角色卡（见 sanitizeCssForStyleTag） */}
+            {scoped ? <style dangerouslySetInnerHTML={{ __html: sanitizeCssForStyleTag(scoped) }} /> : null}
         </>
     );
 }

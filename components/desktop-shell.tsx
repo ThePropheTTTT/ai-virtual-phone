@@ -142,6 +142,7 @@ import { WeixinSyncToast } from "@/components/weixin-sync-toast";
 import { sendBrowserNotification } from "@/lib/browser-notification";
 import type { ChatSharePayload } from "@/lib/chat-share";
 import { completePendingMcpOAuthCallback } from "@/lib/tool-executor";
+import { sanitizeCssForStyleTag } from "@/lib/css-scoper";
 import { LayoutGrid, LoaderCircle, RefreshCw } from "lucide-react";
 
 const EMOJI_FONTS = '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Twemoji Mozilla"';
@@ -1125,6 +1126,15 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     // Listen for iframe communication (DIY Widgets)
     const onIframeMessage = (e: MessageEvent) => {
       if (e.data?.type === "OS_CMD") {
+        // 来源校验：此前只看 e.data.type，因此页面里任何 iframe——包括渲染模型输出 /
+        // 导入角色卡的剧情生成页与聊天 HTML 卡片——都能发号施令（open_app / show_notice /
+        // simulate_call）。这里要求发送方必须是本页内的 iframe，且必须是当前挂载的那个，
+        // 顶层窗口或其他窗口的 postMessage 一律忽略。
+        const source = e.source as Window | null;
+        if (!source || source === window || source.parent !== window) return;
+        const sourceFrame = Array.from(document.querySelectorAll("iframe"))
+          .find(frame => frame.contentWindow === source);
+        if (!sourceFrame) return;
         if (e.data.action === "open_app" && typeof e.data.appId === "string") {
           setActiveApp(e.data.appId as DesktopIconId);
         } else if (e.data.action === "show_notice" && typeof e.data.message === "string") {
@@ -4428,7 +4438,8 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
               ) : null}
 
               {/* Music custom CSS — injected at shell level so it persists across apps */}
-              {musicCustomCss && <style dangerouslySetInnerHTML={{ __html: musicCustomCss }} />}
+              {/* 中和 </style 逃逸：该 CSS 可由模型生成（见 sanitizeCssForStyleTag） */}
+              {musicCustomCss && <style dangerouslySetInnerHTML={{ __html: sanitizeCssForStyleTag(musicCustomCss) }} />}
 
               {/* Music overlays are isolated so playback progress does not rerender the desktop shell. */}
               <MusicShellOverlays

@@ -4,10 +4,15 @@ import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "reac
 import { Loader2 } from "lucide-react";
 import { LanguageIcon } from "@heroicons/react/24/solid";
 import { marked } from "marked";
+import DOMPurify from "dompurify";
+import { sanitizeCssForStyleTag } from "@/lib/css-scoper";
 import { translateReasoningText } from "@/lib/reasoning-translate";
 
-/** Standard HTML tags — anything not in this set gets stripped (content kept) */
-const STANDARD_TAGS = new Set([
+/**
+ * 渲染器要保留下来的普通标签（含 HTML 页面模式常用的布局与 SVG 元素）。
+ * 注意 setConfig 会整体覆盖默认白名单，所以这里必须写全，不能只列增量。
+ */
+const RENDER_ALLOWED_TAGS = [
     "a","abbr","address","area","article","aside","audio","b","base","bdi","bdo",
     "blockquote","body","br","button","canvas","caption","cite","code","col",
     "colgroup","data","datalist","dd","del","details","dfn","dialog","div","dl",
@@ -15,14 +20,112 @@ const STANDARD_TAGS = new Set([
     "h3","h4","h5","h6","head","header","hgroup","hr","html","i","iframe","img",
     "input","ins","kbd","label","legend","li","link","main","map","mark","menu",
     "meta","meter","nav","noscript","object","ol","optgroup","option","output","p",
-    "picture","pre","progress","q","rp","rt","ruby","s","samp","script","search",
+    "picture","pre","progress","q","rp","rt","ruby","s","samp","search",
     "section","select","slot","small","source","span","strong","style","sub",
     "summary","sup","table","tbody","td","template","textarea","tfoot","th",
     "thead","time","title","tr","track","u","ul","var","video","wbr",
     "svg","path","circle","rect","line","polyline","polygon","text","g","defs",
     "use","clippath","mask","filter","lineargradient","radialgradient","stop",
     "center","font","marquee","strike","tt","big",
-]);
+];
+
+// 预处理阶段按此集合剥离非白名单标签（保留内容），避免 marked 把缩进 HTML 当代码块。
+// 与 DOMPurify 共用同一份白名单，两处不会再漂移。
+const RENDER_ALLOWED_TAG_SET = new Set(RENDER_ALLOWED_TAGS.map(tag => tag.toLowerCase()));
+
+/**
+ * srcDoc 生成页的 CSP：default-src 'none' 让被注入的脚本无法把读到的本地数据发出去
+ * （fetch/img/beacon 全被封死），同时保留行内脚本与样式、同源字体/图片，使生成页
+ * 的既有交互（手风琴、折叠、模板 JS）继续可用。
+ */
+const SRCDOC_CONTENT_SECURITY_POLICY = [
+    "default-src 'none'",
+    "script-src 'unsafe-inline'",
+    "style-src 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "media-src 'self' data: blob:",
+    "connect-src 'none'",
+    "form-action 'none'",
+    "base-uri 'none'",
+].join("; ");
+
+/**
+ * 净化 LLM / 角色卡生成的 HTML。
+ *
+ * 背景：这里的内容来自模型输出与从社区导入的角色卡，**不是**可信输入。此前只用一个
+ * 正则删 `<script>` 标签，`onerror` / `onload` / `javascript:` / `<iframe>` 全部保留，
+ * 最终走 dangerouslySetInnerHTML 或 srcDoc iframe——等于让模型输出在本站源上执行脚本，
+ * 而本 PWA 的 LLM API 密钥与全部聊天记录都明文存在 IndexedDB 里。
+ *
+ * 用 DOMPurify（项目本就依赖了它，此前从未 import）做真正的白名单净化：
+ *  - 默认剔除全部 on* 事件属性与 javascript: URL（这是原正则完全没管的部分）
+ *  - 显式禁止 script / base / object，避免标签闭合绕过
+ *  - 显式放行 style 与 svg 等渲染器依赖的元素（setConfig 覆盖默认白名单，不写全会被删）
+ */
+/**
+ * 净化 LLM / 角色卡生成的 HTML。
+ *
+ * 背景：这里的内容来自模型输出与从社区导入的角色卡，**不是**可信输入。此前只用一个
+ * 正则删 `<script>` 标签，`onerror` / `onload` / `javascript:` / `<iframe>` 全部保留，
+ * 最终走 dangerouslySetInnerHTML 或 srcDoc iframe——等于让模型输出在本站源上执行脚本，
+ * 而本 PWA 的 LLM API 密钥与全部聊天记录都明文存在 IndexedDB 里。
+ *
+ * 用 DOMPurify（项目本就依赖了它，此前从未 import）做真正的白名单净化：
+ *  - 默认剔除全部 on* 事件属性与 javascript: URL（这是原正则完全没管的部分）
+ *  - FORBID_TAGS 显式去掉 script / base / object，避免标签闭合绕过
+ *  - 显式放行 style 与 svg 等渲染器依赖的元素（ALLOWED_TAGS 会整体覆盖默认白名单）
+ *
+ * 配置按调用传入而不是走 DOMPurify.setConfig：后者是全局状态，会和代码库其他地方
+ * 的净化调用互相覆盖。
+ */
+const RENDER_SANITIZE_CONFIG = {
+    ALLOWED_TAGS: RENDER_ALLOWED_TAGS,
+    // 用 ADD_ATTR 在 DOMPurify 默认安全属性列表之上做增量扩展。
+    // 注意不能用 ALLOWED_ATTR（它会整体覆盖默认列表，实测会把 class/style/src 全剥掉，
+    // 生成页直接渲染成空白）；也不要写 ALLOWED_ATTR: ["*"]——那不等于"允许全部"。
+    ADD_ATTR: [
+        "class", "id", "style", "src", "srcset", "sizes", "alt", "title", "href",
+        "target", "rel", "width", "height", "colspan", "rowspan", "span", "start",
+        "value", "type", "name", "placeholder", "checked", "disabled", "selected",
+        "role", "viewBox", "d", "fill", "stroke", "stroke-width", "cx", "cy", "r",
+        "x", "y", "x1", "y1", "x2", "y2", "points", "transform", "preserveAspectRatio",
+        "data-action", "data-fold-tag", "data-*",
+    ],
+    // 显式禁止可执行 / 可导航的协议；其余 URL 协议不限制
+    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|data|blob):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i,
+    FORBID_TAGS: ["script", "base", "object"],
+};
+
+/**
+ * DOMPurify 会无条件丢弃 <style> 元素里的 CSS 文本（多种配置与 hook 方案实测均无法放行），
+ * 而剧情模式的生成页大量依赖 <style> 定义样式，直接净化会让整页丢样式。
+ *
+ * 因此先把 <style> 块抽成纯文本哨兵（净化后还原），其余 HTML 照常过白名单。
+ * 还原时用 sanitizeCssForStyleTag 中和 `</style` 逃逸——这是这条旁路唯一需要的防护，
+ * 因为 CSS 不参与 HTML 解析。
+ */
+const STYLE_SENTINEL_PREFIX = "___AI_PHONE_STYLE_BLOCK_";
+const STYLE_SENTINEL_RE = /___AI_PHONE_STYLE_BLOCK_(\d+)___/g;
+
+function sanitizeRenderedHtml(html: string): string {
+    if (typeof window === "undefined") return html;
+
+    const styleBlocks: string[] = [];
+    const staged = html.replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gi, (_match, css: string) => {
+        styleBlocks.push(sanitizeCssForStyleTag(css));
+        return `${STYLE_SENTINEL_PREFIX}${styleBlocks.length - 1}___`;
+    });
+
+    const cleaned = DOMPurify.sanitize(staged, RENDER_SANITIZE_CONFIG) as unknown as string;
+
+    return cleaned.replace(STYLE_SENTINEL_RE, (_match, index: string) => {
+        const css = styleBlocks[Number(index)];
+        // 样式在 srcDoc iframe 内生效，且 iframe 自带 CSP，不会影响父页面
+        return css ? `<style>${css}</style>` : "";
+    });
+}
+
 
 // ── Content splitting: separate ```html blocks from regular content ──
 
@@ -188,7 +291,7 @@ function MarkdownSegment({ content, scopeClass }: { content: string; scopeClass:
         // 0. Pre-process:
         const preprocessed = content
             .replace(/<\/?([a-zA-Z][a-zA-Z0-9_-]*)[^>]*>/g, (match, tag) =>  // strip all non-standard HTML tags (keep content)
-                STANDARD_TAGS.has(tag.toLowerCase()) ? match : "")
+                RENDER_ALLOWED_TAG_SET.has(tag.toLowerCase()) ? match : "")
             .replace(/^[ \t]+/gm, "")                     // strip leading whitespace (prevents marked treating indented HTML as code blocks)
             .replace(/\n{3,}/g, "\n\n")                    // max 2 consecutive newlines
             .replace(/(>)\s*\n\n\s*(<)/g, "$1\n$2");       // remove blank lines between HTML tags
@@ -196,9 +299,9 @@ function MarkdownSegment({ content, scopeClass }: { content: string; scopeClass:
         // 1. Markdown → HTML
         const rawHtml = marked.parse(preprocessed, { async: false }) as string;
 
-        // 2. Strip only <script> tags (security), keep everything else as-is
-        //    No DOMPurify — regex-processed HTML is user-configured and trusted
-        let clean = rawHtml.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
+        // 2. 白名单净化：内容来自模型输出 / 导入的角色卡，必须按不可信处理。
+        //    此前只删 <script>，on* 事件属性与 javascript: URL 会原样留下并在本页执行。
+        let clean = sanitizeRenderedHtml(rawHtml);
 
         // 2.5 单换行(<br>)后的行也做首行缩进：CSS text-indent 只作用于段落首行，
         //     标准的 each-line 关键字浏览器均未实现，这里在每个 <br> 后插入
@@ -274,6 +377,9 @@ function HtmlPageSegment({ html, onOptionSelect, htmlPageMode, serifIframeFallba
         // UA 默认是无衬线（iOS 苹方）。把宋体默认值注入到文档最前面——生成页
         // 自己声明的 font-family 在后面，仍会覆盖这里，只兜底不强制。
         const fontFallback = `<style>@font-face{font-family:"Noto Serif SC";src:url("/fonts/interview/noto-serif-sc.woff2") format("woff2");font-weight:300 900;font-display:swap}body{font-family:"Noto Serif SC","Source Han Serif SC","Songti SC","STSong",Georgia,serif}</style>`;
+        // 安全栅栏：SRCDOC_CONTENT_SECURITY_POLICY 见文件上方定义。
+        // 放在文档最前，使它在任何生成页内容之前生效。
+        const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${SRCDOC_CONTENT_SECURITY_POLICY}">`;
         let h = html;
         // Convert basic markdown inside hidden data divs
         h = h.replace(
@@ -287,6 +393,8 @@ function HtmlPageSegment({ html, onOptionSelect, htmlPageMode, serifIframeFallba
         h = h.replace(/\.textContent\.trim\(\)/g, ".innerHTML.trim()");
         // 字体兜底放到文档最前，保证生成页自己的样式能覆盖它（仅剧情模式启用）
         if (serifIframeFallback) h = fontFallback + h;
+        // CSP 元标签必须尽量靠前（放在 </head> 前），否则在它之前的标签不受约束
+        h = h.includes("</head>") ? h.replace("</head>", `${cspMeta}</head>`) : cspMeta + h;
         if (h.includes("</body>")) h = h.replace("</body>", bridge + "</body>");
         else h = h + bridge;
         return h;
@@ -365,6 +473,11 @@ function HtmlPageSegment({ html, onOptionSelect, htmlPageMode, serifIframeFallba
             ref={iframeRef}
             srcDoc={srcDoc}
             title="HTML content"
+            // 生成页来自模型输出 / 导入的角色卡，按不可信处理。保留 allow-scripts 是
+            // 因为高度桥接脚本与生成页自带的交互 JS 需要它；allow-same-origin 让
+            // /fonts 等同源资源仍可加载。真正的越权面（读本机 IndexedDB 里的 API 密钥、
+            // 外发数据）由 srcDoc 内的 CSP 与 on* 属性净化共同阻断。
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
             style={{
                 width: "100%",
                 height,

@@ -22,6 +22,27 @@ export function extractCssImports(raw: string): { imports: string[]; css: string
 }
 
 /**
+ * 中和 CSS 里能跳出 <style> 的序列。
+ *
+ * <style> 是 raw text 元素：浏览器只找字面的 `</style`，遇到就结束样式表、把后面的
+ * 内容当 HTML 继续解析。所以 `</style><img src=x onerror=...>` 能把"CSS 注入"升级成
+ * HTML/XSS——而自定义 CSS 的来源包含模型生成内容与导入的角色卡，属不可信输入。
+ *
+ * 处理三步：
+ *  1. 删掉 HTML 注释标记（raw text 解析器对 `<!--` 有特殊处理）；
+ *  2. 把剩余 `</` 里的 `<` 换成删除线修饰符 U+0338。按 CSS 语法它静默无效，
+ *     所以样式照常生效，但源文本里不再存在字面的 `</`；
+ *  3. 最后再兜一次不区分大小写的 `</style`，防止上面被绕过。
+ */
+export function sanitizeCssForStyleTag(raw: string): string {
+  if (!raw) return "";
+  return raw
+    .replace(/<!--|-->/g, "")
+    .replace(/<\//g, "\u0338/")
+    .replace(/<\s*\/\s*style/gi, "\u0338/ style");
+}
+
+/**
  * Scope raw CSS so every rule selector is prefixed with a scope selector.
  * - `body` / `html` / `:root` selectors are replaced with the scope selector.
  * - `@keyframes` / `@font-face` blocks are passed through unchanged.

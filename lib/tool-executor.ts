@@ -645,42 +645,27 @@ async function executeCompositeScriptStep(
     stepArgs: Record<string, unknown>,
     scope: Record<string, unknown>,
 ): Promise<ToolResult> {
+    const stepName = step.name || step.saveAs || "脚本步骤";
+
+    // 安全闸：脚本步骤是宿主页面内的任意 JS 执行（AsyncFunction），等于把模型输出
+    // 变成同源代码执行——可读 IndexedDB 里的 API key 与全部聊天记录，并可外发数据。
+    // 由于 AI 默认拥有「工具箱管理」能力（enabled + mode:"auto"），模型可以自行
+    // 「添加组合工具」写入 steps[].script 并立刻执行，全程没有用户确认。
+    // 这里在唯一执行点硬禁用：即便历史数据里已存在带 script 的工具，也不会再运行。
     const script = step.script?.trim();
-    if (!script) {
-        return { name: step.name || step.saveAs || "脚本步骤", success: false, error: "script 不能为空" };
+    if (script) {
+        return {
+            name: stepName,
+            success: false,
+            error: [
+                "已停用脚本步骤：脚本在宿主页面内执行任意 JS，可读取本地 API 密钥与聊天记录，已被安全策略禁用。",
+                `组合工具「${tool.name}」的该步骤不再运行。请改用 rest / internal / mcp / composite 类型步骤。`,
+            ].join("\n"),
+        };
     }
 
-    try {
-        const AsyncFunction = Object.getPrototypeOf(async function () { /* noop */ }).constructor as {
-            new (...args: string[]): (...values: unknown[]) => Promise<unknown>;
-        };
-        const runner = new AsyncFunction("input", "steps", "last", "args", "context", script);
-        const value = await runner(
-            scope.input,
-            scope.steps,
-            scope.last,
-            stepArgs,
-            {
-                toolId: tool.id,
-                toolName: tool.name,
-                stepId: step.id,
-                stepName: step.name || step.saveAs || "脚本步骤",
-                saveAs: step.saveAs,
-            },
-        );
-        return {
-            name: step.name || step.saveAs || "脚本步骤",
-            success: true,
-            data: truncate(stringifyCompositeScriptReturn(value)),
-        };
-    } catch (err) {
-        const error = err instanceof Error ? (err.stack || err.message) : String(err);
-        return {
-            name: step.name || step.saveAs || "脚本步骤",
-            success: false,
-            error,
-        };
-    }
+    // 保留原有空脚本提示，避免改变「脚本步骤但内容为空」时的既有语义。
+    return { name: stepName, success: false, error: "script 不能为空" };
 }
 
 async function executeCompositeTool(

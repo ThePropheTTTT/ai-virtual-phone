@@ -13,9 +13,11 @@ import { MediaPreviewOverlay } from "@/components/chat/media-preview-overlay";
 import { findStickerByName } from "@/lib/sticker-data";
 import { splitBilingualText } from "@/lib/bilingual-text";
 import { isInvisibleOrWhitespaceOnly } from "@/lib/rich-message-parser";
+import { sanitizeCssForStyleTag } from "@/lib/css-scoper";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
+import DOMPurify from "dompurify";
 // CommonMark 的 flanking 规则会让 **「加粗」** 这类紧贴全角标点的写法解析失败
 // （** 后跟标点时要求前面是空格/标点，中文里前面通常是汉字），中文消息大量中招。
 import remarkCjkFriendly from "remark-cjk-friendly";
@@ -222,6 +224,29 @@ export function isStandaloneHtmlPreviewContent(content: string): boolean {
     return segments.length === 1 && segments[0].type === "html";
 }
 
+/**
+ * 聊天内嵌 HTML 的 CSP：default-src 'none' 让生成页里被注入的脚本无法把读到的本地数据
+ * 外发（connect/img/beacon 全封），同时保留行内脚本与样式，使生成页既有交互继续可用。
+ */
+const CHAT_SRCDOC_CSP = [
+    "default-src 'none'",
+    "script-src 'unsafe-inline'",
+    "style-src 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "media-src 'self' data: blob:",
+    "connect-src 'none'",
+    "form-action 'none'",
+    "base-uri 'none'",
+].join("; ");
+
+/** 给 srcDoc 文档注入 CSP 元标签；放在 </head> 前，缺失 head 时退到文档最前。 */
+function withChatSrcDocCsp(html: string): string {
+    const meta = `<meta http-equiv="Content-Security-Policy" content="${CHAT_SRCDOC_CSP}">`;
+    if (html.includes("</head>")) return html.replace("</head>", `${meta}</head>`);
+    return meta + html;
+}
+
 /** Full-screen iframe modal for interactive HTML content */
 function HtmlFullscreenModal({ html, onClose, onActionSelect }: { html: string; onClose: () => void; onActionSelect?: (text: string) => void }) {
     const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -249,7 +274,7 @@ function HtmlFullscreenModal({ html, onClose, onActionSelect }: { html: string; 
         let h = html;
         if (h.includes("</body>")) h = h.replace("</body>", inject + "</body>");
         else h = h + inject;
-        return h;
+        return withChatSrcDocCsp(h);
     }, [html]);
 
     useEffect(() => {
@@ -275,6 +300,8 @@ function HtmlFullscreenModal({ html, onClose, onActionSelect }: { html: string; 
                 ref={iframeRef}
                 srcDoc={srcDoc}
                 onClick={(e) => e.stopPropagation()}
+                // 同 HtmlPreviewCard：沙箱 + srcDoc CSP 双向限制生成页
+                sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
             />
         </div>,
         portalTarget
@@ -306,8 +333,8 @@ function buildChatHtmlDocument(html: string, inline = false): string {
             setTimeout(send,1200);
             setTimeout(send,2500);` : "";
     const inject = `<script>(function(){${action}${resize}})();<\/script>`;
-    if (html.includes("</body>")) return html.replace("</body>", inject + "</body>");
-    return html + inject;
+    const doc = html.includes("</body>") ? html.replace("</body>", inject + "</body>") : html + inject;
+    return withChatSrcDocCsp(doc);
 }
 
 type ChatHtmlFrameVariant = "default" | "offline";
@@ -353,6 +380,10 @@ function ChatHtmlInlineFrame({
                 className="chat-html-inline-frame"
                 srcDoc={srcDoc}
                 title="AI 生成互动内容"
+                // 生成页来自模型输出 / 导入的角色卡。allow-same-origin 让同源字体与
+                // data: 图片仍可加载；越权面（读本机 API 密钥、外发数据）由 srcDoc
+                // 内的 CSP 阻断，iframe 也只能通过已被 source 校验的 postMessage 回话。
+                sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
                 style={{ height }}
             />
             {allowFullscreen ? (
@@ -480,6 +511,48 @@ const MARKDOWN_COMPONENTS = {
     content: ({ node, ...props }: any) => <div className="rm-content" {...props} />
 } as any;
 
+/**
+ * 净化进入 ReactMarkdown 的内容。
+ *
+ * 这里必须净化：下面两处渲染都挂了 rehypeRaw，它会把消息正文里的原始 HTML **重新解析**
+ * 成节点，再交给上面的 components 映射渲染进主文档。消息正文来自模型输出与导入的角色卡，
+ * 属于不可信输入——未净化时 `onerror` 等属性会被重新解析出来并在本页执行，而本 PWA 的
+ * LLM API 密钥与全部聊天记录都明文存在 IndexedDB。
+ *
+ * 注意不能改成简单地移除 rehypeRaw：`user`/`prologue`/`profile`/`branches`/`content` 这些
+ * 自定义标签正是靠它才能变成 React 元素，去掉会破坏消息渲染。
+ *
+ * style 标签在此处被禁止（extractStyles 已先把 <style> 抽出来单独处理），避免 CSS 外溢。
+ */
+const BUBBLE_CUSTOM_TAGS = ["user", "prologue", "profile", "branches", "content"];
+const BUBBLE_ALLOWED_TAGS = [
+    "a","b","blockquote","br","code","del","details","div","em","h1","h2","h3","h4","h5","h6",
+    "hr","i","img","li","ol","p","pre","small","span","strong","sub","summary","sup","table",
+    "tbody","td","tfoot","th","thead","tr","u","ul",
+    ...BUBBLE_CUSTOM_TAGS,
+];
+
+const BUBBLE_SANITIZE_CONFIG = {
+    ALLOWED_TAGS: BUBBLE_ALLOWED_TAGS,
+    // 用 ADD_ATTR 在默认安全属性列表之上扩展；不能用 ALLOWED_ATTR（会覆盖默认列表，
+    // 实测把 class 等常规属性也一并剥掉）。
+    ADD_ATTR: ["class", "id", "title", "href", "target", "rel", "alt", "src", "width", "height", "colspan", "rowspan"],
+    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|data|blob):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i,
+    // style 由 extractStyles 单独抽出并消毒，这里禁止，避免 CSS 经消息正文外溢
+    FORBID_TAGS: ["script", "style", "base"],
+    CUSTOM_ELEMENT_HANDLING: {
+        tagNameCheck: /^(?:user|prologue|profile|branches|content)$/,
+        attributeNameCheck: /^[a-zA-Z][\w-]*$/,
+        allowCustomizedBuiltInElements: false,
+    },
+    // 配置按调用传入而非 DOMPurify.setConfig，避免与代码库其他净化调用互相覆盖
+};
+
+function sanitizeBubbleHtml(html: string): string {
+    if (typeof window === "undefined") return html;
+    return DOMPurify.sanitize(html, BUBBLE_SANITIZE_CONFIG) as unknown as string;
+}
+
 function MarkdownTextContent({
     content,
     onActionSelect,
@@ -533,12 +606,14 @@ function MarkdownTextContent({
         const { styles, body } = extractStyles(cleaned);
         const mdCleaned = wrapQuotedDialogue(linkifyBareUrls(stripPaySchemeUrls(body.trim())));
         if (!mdCleaned && !styles && payUrls.length === 0) return null;
+        // rehypeRaw 会把正文里的原始 HTML 重新解析，因此先净化（见 sanitizeBubbleHtml）
+        const mdSafe = sanitizeBubbleHtml(mdCleaned);
         return (
             <div className="chat-markdown hide-scrollbar break-words" ref={containerRef}>
-                {styles && <style dangerouslySetInnerHTML={{ __html: styles }} />}
-                {mdCleaned && (
+                {styles && <style dangerouslySetInnerHTML={{ __html: sanitizeCssForStyleTag(styles) }} />}
+                {mdSafe && (
                     <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks, remarkCjkFriendly]} rehypePlugins={[rehypeRaw]} components={MARKDOWN_COMPONENTS}>
-                        {mdCleaned}
+                        {mdSafe}
                     </ReactMarkdown>
                 )}
                 {payUrls.map((u, i) => <ScanPayCard key={`pay-${i}`} url={u} />)}
@@ -556,12 +631,14 @@ function MarkdownTextContent({
                 // Extract styles only from markdown segments (not from html blocks)
                 const { styles, body } = extractStyles(seg.content);
                 const mdContent = wrapQuotedDialogue(linkifyBareUrls(stripPaySchemeUrls(body.trim())));
+                // rehypeRaw 会把正文里的原始 HTML 重新解析，因此先净化（见 sanitizeBubbleHtml）
+                const mdSafe = sanitizeBubbleHtml(mdContent);
                 return (
                     <div key={`md-${i}`}>
-                        {styles && <style dangerouslySetInnerHTML={{ __html: styles }} />}
-                        {mdContent && (
+                        {styles && <style dangerouslySetInnerHTML={{ __html: sanitizeCssForStyleTag(styles) }} />}
+                        {mdSafe && (
                             <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks, remarkCjkFriendly]} rehypePlugins={[rehypeRaw]} components={MARKDOWN_COMPONENTS}>
-                                {mdContent}
+                                {mdSafe}
                             </ReactMarkdown>
                         )}
                     </div>
