@@ -171,9 +171,19 @@ export type UpstreamResolution = {
     source: UpstreamSource;
 };
 
-/** 推导时替换成的端口；上游换了端口就配这个，不用改代码。 */
+/**
+ * 推导时替换成的端口。
+ *
+ * 与客户端共用同一个变量（NEXT_PUBLIC_NETEASE_API_PORT）：客户端推导出的地址会经
+ * 请求头优先采用，这里只是「没带头时」的兜底。两边用同一个名字，才不会出现
+ * 「客户端按 4001 推导、服务端按别的端口推导」这种配歪的情况。
+ * 仍保留读取 NETEASE_API_DERIVE_PORT 作为兼容。
+ */
 function derivedPort(): string {
-    return (process.env.NETEASE_API_DERIVE_PORT || "4001").trim() || "4001";
+    const raw = process.env.NEXT_PUBLIC_NETEASE_API_PORT
+        || process.env.NETEASE_API_DERIVE_PORT
+        || "4001";
+    return raw.trim() || "4001";
 }
 
 /**
