@@ -63,6 +63,11 @@ export async function GET(request: NextRequest) {
         seenHost: host || "",
         seenProtocol: protocol,
     };
+    /** 顶层也暴露服务端构建标识：一条 curl 就能判断部署的是不是新版，不用翻设置页 */
+    const buildEnvelope = {
+        serverBuild: server.buildId,
+        serverBuiltAt: server.builtAt,
+    };
     if (!baseUrl) {
         return NextResponse.json({
             configured: false,
@@ -70,6 +75,7 @@ export async function GET(request: NextRequest) {
             baseUrl: "",
             source,
             diagnostics,
+            ...buildEnvelope,
             message: "未拿到上游地址：请在音乐设置里填写 API 地址，或设置服务端 NETEASE_API_BASE。",
         });
     }
@@ -87,6 +93,7 @@ export async function GET(request: NextRequest) {
                 baseUrl,
                 source,
                 diagnostics,
+                ...buildEnvelope,
                 message: `上游返回 HTTP ${probe.status}（地址可达但接口异常）`,
             });
         }
@@ -98,6 +105,7 @@ export async function GET(request: NextRequest) {
             baseUrl,
             source,
             diagnostics,
+            ...buildEnvelope,
             message: hasResult ? "连接成功" : "上游返回格式异常",
         });
     } catch (error) {
@@ -108,6 +116,7 @@ export async function GET(request: NextRequest) {
             baseUrl,
             source,
             diagnostics,
+            ...buildEnvelope,
             message: `无法连接上游（${baseUrl}）：${detail}`,
         });
     }
