@@ -531,6 +531,29 @@
   -webkit-backdrop-filter: blur(22.01px) saturate(140%);
 }
 
+/* 交互期降级：翻页时关掉图标的实时 backdrop-filter。
+   桌面一屏 24 个图标，每个一块 blur(22px) 各自成层（.icon-glyph-box 上还有
+   isolation:isolate + will-change:transform）。翻页是在 .phone-swipe-layer 上跑
+   300ms 的 transform 过渡，这 24 块模糊会被逐帧重算 —— 这是移动端翻页卡顿的主因。
+   与 widgets.css 里给小组件做的 data-glass-busy 降级是同一套办法：直接切 shell
+   属性、不触发 React 重渲染；实时模糊关掉期间用静态渐变顶住观感（纯 background，
+   GPU 成本≈0），松手约 360ms 后真磨砂回归。
+   注意不加 [data-glass-pass] 限定，两种 pass 都要生效。 */
+.phone-shell[data-glass-busy="1"][data-icon-effect="glass"] .icon-glyph-box {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  will-change: auto !important;
+  background: linear-gradient(135deg,
+    rgba(255, 255, 255, 0.34),
+    color-mix(in srgb, var(--c-desktop-icon-bg, #c7b8ff) 8%, transparent) 55%,
+    rgba(255, 255, 255, 0.18)) !important;
+}
+
+/* 高光层用了 mix-blend-mode: screen，是另一个逐帧合成成本，降级期一并去掉 */
+.phone-shell[data-glass-busy="1"][data-icon-effect="glass"] .icon-glyph-box::before {
+  display: none !important;
+}
+
 .phone-shell[data-icon-effect="transparent"] .icon-glyph-box {
   /** background-color: transparent !important; */
   box-shadow: none !important;

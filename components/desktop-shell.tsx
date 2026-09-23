@@ -3455,12 +3455,19 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
   }
 
   /**
-   * Suspend real backdrop-filter blur on glass widgets for a short window while
-   * the desktop is busy adding/dragging. The live blur is the dominant GPU cost
-   * during reflow; we toggle a DOM attribute directly (no React state) so it
-   * doesn't itself trigger a re-render, then let the blur snap back when idle.
+   * Suspend real backdrop-filter blur on glass surfaces for a short window while
+   * the desktop is busy (adding/dragging widgets, switching desktop pages).
+   *
+   * The live blur is the dominant GPU cost during reflow: the desktop can hold 24
+   * glass icons plus glass widgets, each its own blurred layer, and a page switch
+   * animates a 300ms transform that makes the compositor re-evaluate all of them
+   * every frame. We toggle a DOM attribute directly (no React state) so it doesn't
+   * itself trigger a re-render, then let the blur snap back when idle.
+   *
+   * Declared as useCallback (it only touches refs) so callers can depend on it
+   * without their own memoisation being invalidated every render.
    */
-  function suspendGlass(): void {
+  const suspendGlass = useCallback((): void => {
     const el = shellRef.current;
     if (!el) return;
     el.setAttribute("data-glass-busy", "1");
@@ -3469,7 +3476,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
       shellRef.current?.removeAttribute("data-glass-busy");
       glassBusyTimerRef.current = 0;
     }, 360);
-  }
+  }, []);
 
   function handleWidgetsChange(next: WidgetInstance[]): void {
     suspendGlass();
@@ -3864,8 +3871,29 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     // currentPageIndex is the single source of truth → CSS settles to it, no race.
     swipeLayerRef.current?.classList.remove("phone-swipe-dragging");
     setSwipeDrag(0);
-    if (targetPageIndex !== page) setCurrentPageIndex(targetPageIndex);
-  }, [editMode, getSwipePageWidth, pageCount, setSwipeDrag]);
+    if (targetPageIndex !== page) {
+      // 翻页会在 .phone-swipe-layer 上跑 300ms 的 transform 过渡。桌面一屏 24 个
+      // 玻璃图标各自带一块 backdrop-filter blur(22px)，过渡期间会被逐帧重算，
+      // 在移动端就是那"卡一下"。这里按作者给小组件做的同一套办法临时关掉实时模糊
+      // （直接切 DOM 属性、不触发重渲染），360ms 后自动恢复。
+      suspendGlass();
+      setCurrentPageIndex(targetPageIndex);
+    }
+  }, [editMode, getSwipePageWidth, pageCount, setSwipeDrag, suspendGlass]);
+
+  /**
+   * 聊天 APP 的关闭回调。
+   *
+   * 必须具名：PhoneChatApp 是 memo 的（phone-chat-app.tsx:31），而它内部的 ChatRoom
+   * 有 6000+ 行。之前这里写成内联箭头函数 `onClose={() => {...}}`，每次 DesktopShell
+   * 重渲染都是新引用，memo 直接失效 —— 于是滑页、notice 提示等任何 shell 状态变化，
+   * 都会把整个聊天界面跟着重渲染一遍。
+   */
+  const handleChatAppClose = useCallback(() => {
+    setActiveApp(null);
+    setActiveChatSession(null);
+    setChatInitSessionId(null);
+  }, []);
 
   const handleCloseXiaohongshu = useCallback((isBusy?: boolean) => {
     const shouldKeepMounted = isBusy ?? xiaohongshuBusy;
@@ -3982,11 +4010,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     if (activeApp === "chat") {
       return (
         <PhoneChatApp
-          onClose={() => {
-            setActiveApp(null);
-            setActiveChatSession(null);
-            setChatInitSessionId(null);
-          }}
+          onClose={handleChatAppClose}
           initialSessionId={chatInitSessionId}
           onSessionChange={setActiveChatSession}
         />
