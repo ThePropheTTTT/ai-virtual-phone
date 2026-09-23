@@ -112,6 +112,43 @@ function withNeteaseParams(url: string): string {
  */
 const NETEASE_BASE_HEADER = "x-netease-base";
 
+/** 客户端自报版本用的请求头；服务端在 netease-info 的 diagnostics.clientBuild 里回显。 */
+const NETEASE_CLIENT_BUILD_HEADER = "x-netease-client-build";
+
+/**
+ * 客户端音乐代码的版本标记。
+ *
+ * 用途：服务端在 /api/music/netease-info 的 diagnostics.clientBuild 里回显这个值。
+ * 排查「电脑上好了、手机上还是不行」时，它能**直接证明设备上跑的是哪一版代码**——
+ * iOS Safari 对 PWA 的缓存非常顽固，不确认这一点就只能瞎猜。
+ *
+ * 改动音乐相关代码时把它改一下，这个诊断价值就一直在。
+ */
+export const MUSIC_CLIENT_VERSION = "music-proxy-2024-09-v3";
+
+/**
+ * 最近一次音乐请求失败的原因。
+ *
+ * 原本所有请求都是静默 catch 的（返回空数组/ null），失败时界面上什么都看不到，
+ * 手机上尤其无从判断。这里把原因留下来，设置界面直接展示。
+ */
+let lastMusicRequestError: { at: string; scope: string; message: string } | null = null;
+
+export function getLastMusicRequestError(): { at: string; scope: string; message: string } | null {
+    return lastMusicRequestError;
+}
+
+export function clearLastMusicRequestError(): void {
+    lastMusicRequestError = null;
+}
+
+function recordMusicError(scope: string, error: unknown): void {
+    const message = error instanceof Error
+        ? `${error.name}: ${error.message}`
+        : String(error);
+    lastMusicRequestError = { at: new Date().toISOString(), scope, message };
+}
+
 /**
  * 推导上游端口。默认 4001 只是「同机部署常见取值」，不是写死的约束——
  * 上游换端口就配 NEXT_PUBLIC_NETEASE_API_PORT，无需改代码。
@@ -152,8 +189,13 @@ export function resolveSettingsBaseUrl(): string {
 function musicFetchInit(): RequestInit | undefined {
     if (NETEASE_DIRECT_MODE) return undefined;
     const target = resolveSettingsBaseUrl();
-    if (!target) return undefined;
-    return { headers: { [NETEASE_BASE_HEADER]: target } };
+    return {
+        headers: {
+            ...(target ? { [NETEASE_BASE_HEADER]: target } : {}),
+            // 无论有没有推导出地址都带上版本标记，服务端据此判断客户端跑的是哪一版
+            [NETEASE_CLIENT_BUILD_HEADER]: MUSIC_CLIENT_VERSION,
+        },
+    };
 }
 
 // ── Netease API Types ──
@@ -283,23 +325,36 @@ function resolveNeteaseRequestBase(baseUrl: string): string {
     return NETEASE_PROXY_PATH;
 }
 
-/** 服务端代理实际使用的上游地址，供设置界面展示与连接测试。 */
-export async function getNeteaseProxyInfo(): Promise<{
+/** 服务端代理状态与诊断，供设置界面展示与连接测试。 */
+export type NeteaseProxyInfo = {
     baseUrl: string;
     configured: boolean;
     reachable: boolean;
     message: string;
-    /** 地址来源：client-header=浏览器带上来的 / env=服务端环境变量 / default=同机回环回退 */
+    /** 地址来源：settings=用户填的 / env=服务端环境变量 / derived=从请求 Host 推导 */
     source?: string;
-}> {
+    /** 服务端回显的诊断信息，用于排查「电脑好、手机不行」 */
+    diagnostics?: {
+        serverBuild?: string;
+        serverBuiltAt?: string;
+        clientBuild?: string;
+        seenBaseHeader?: boolean;
+        seenBaseHeaderValue?: string;
+        seenHost?: string;
+        seenProtocol?: string;
+    };
+};
+
+export async function getNeteaseProxyInfo(): Promise<NeteaseProxyInfo> {
     try {
-        // 同样带上用户填写的地址，使探测结论与真实转发一致
+        // 同样带上用户填写的地址与版本标记，使探测结论与真实转发一致
         const resp = await fetch("/api/music/netease-info", {
             ...(musicFetchInit() as RequestInit | undefined),
             signal: AbortSignal.timeout(20000),
         });
         const data = await resp.json().catch(() => null);
         if (!resp.ok || !data) {
+            recordMusicError("getNeteaseProxyInfo", new Error(`HTTP ${resp.status}`));
             return { baseUrl: "", configured: false, reachable: false, message: data?.message || `HTTP ${resp.status}` };
         }
         return {
@@ -308,8 +363,10 @@ export async function getNeteaseProxyInfo(): Promise<{
             reachable: data.reachable === true,
             message: String(data.message || ""),
             source: data.source ? String(data.source) : undefined,
+            diagnostics: data.diagnostics || undefined,
         };
     } catch (error) {
+        recordMusicError("getNeteaseProxyInfo", error);
         return {
             baseUrl: "",
             configured: false,
@@ -319,17 +376,35 @@ export async function getNeteaseProxyInfo(): Promise<{
     }
 }
 
+/** 本机音乐代码版本，设置界面展示出来即可判断设备是否加载到了最新代码。 */
+export function getMusicClientVersion(): string {
+    return MUSIC_CLIENT_VERSION;
+}
+
 /** Search songs via Netease API */
 export async function searchNetease(query: string, limit = 20): Promise<NeteaseSearchResult[]> {
     const base = neteaseBase();
-    if (!base) return [];
+    if (!base) {
+        recordMusicError("searchNetease", new Error("neteaseBase() 返回空，代理路径未生成"));
+        return [];
+    }
     try {
         const resp = await fetch(withNeteaseParams(`${base}/cloudsearch?keywords=${encodeURIComponent(query)}&limit=${limit}`), musicFetchInit());
+        if (!resp.ok) {
+            // 旧实现直接 resp.json()，非 200 时给出的解析错误掩盖了真实原因
+            recordMusicError("searchNetease", new Error(`HTTP ${resp.status} ${resp.statusText}`));
+            return [];
+        }
         const data = await resp.json();
         const songs = data?.result?.songs;
-        if (!Array.isArray(songs)) return [];
+        if (!Array.isArray(songs)) {
+            recordMusicError("searchNetease", new Error(`返回结构异常：${JSON.stringify(data).slice(0, 200)}`));
+            return [];
+        }
+        clearLastMusicRequestError();
         return songs.map(mapSongToSearchResult);
     } catch (e) {
+        recordMusicError("searchNetease", e);
         console.warn("[MusicService] Netease search failed:", e);
         return [];
     }

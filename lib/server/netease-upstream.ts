@@ -36,6 +36,18 @@ export function requestOriginInfo(request: {
  */
 export const CLIENT_BASE_HEADER = "x-netease-base";
 
+/**
+ * 客户端自报代码版本的请求头。
+ *
+ * 排查「电脑上好了、手机上还是不行」时用它：服务端把这个值回显在
+ * netease-info 的 diagnostics.clientBuild 里，能**直接证明设备上跑的是哪一版**——
+ * iOS Safari 对 PWA 的缓存很顽固，不确认这一点就只能瞎猜。
+ *
+ * 放在这里而不是 route 文件里：Next.js 会校验 App Router 的路由文件导出，
+ * 从 route.ts 导出额外常量会导致类型检查失败。
+ */
+export const CLIENT_BUILD_HEADER = "x-netease-client-build";
+
 /** 自签名证书的实例需要关掉校验才能连上；仅影响本代理到上游这一跳。 */
 export const ALLOW_INSECURE_UPSTREAM =
     (process.env.NETEASE_API_INSECURE || "true").trim().toLowerCase() !== "false";

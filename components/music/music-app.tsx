@@ -14,6 +14,7 @@ import {
     searchNetease, getNeteasePlayInfo, getNeteaseLyrics, getNeteaseSongDetail,
     testNeteaseConnection, getQrKey, getQrImage, checkQrStatus, checkLoginStatus,
     isNeteaseProxied, getNeteaseProxyInfo, inferSameHostBase,
+    getLastMusicRequestError, getMusicClientVersion,
     getUserPlaylists, getPlaylistTracks, saveNeteaseCookie, clearNeteaseCookie,
     getDailyRecommendSongs, getHotSearchDetail, getPersonalizedPlaylists,
     getRecommendResource, getToplists, getUserRecordWithCounts,
@@ -1726,6 +1727,32 @@ function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: ()
                         </div>
                     )}
                 </div>
+
+                {/* 诊断面板：专门用于「电脑好、手机不行」这类只在某台设备上出现的问题。
+                    手机上没法开控制台，所以把版本与最近一次失败原因直接摆出来。 */}
+                {proxied && mounted && (
+                    <div className="music-settings-section">
+                        <div className="music-settings-label">诊断信息</div>
+                        <div className="music-settings-hint" style={{ wordBreak: "break-all", fontFamily: "monospace", fontSize: 11, lineHeight: 1.7 }}>
+                            <div>本机代码版本：{getMusicClientVersion()}</div>
+                            {proxyInfo?.diagnostics && (
+                                <>
+                                    <div>服务端版本：{proxyInfo.diagnostics.serverBuild || "(未读到)"}</div>
+                                    <div>服务端构建于：{proxyInfo.diagnostics.serverBuiltAt || "(未知)"}</div>
+                                    <div>服务端收到本机版本：{proxyInfo.diagnostics.clientBuild || "(空 —— 说明设备上是很旧的代码)"}</div>
+                                    <div>服务端收到上游地址头：{proxyInfo.diagnostics.seenBaseHeader ? `是（${proxyInfo.diagnostics.seenBaseHeaderValue}）` : "否"}</div>
+                                    <div>服务端看到的 Host：{proxyInfo.diagnostics.seenHost || "(空)"}　协议：{proxyInfo.diagnostics.seenProtocol || "(空)"}</div>
+                                </>
+                            )}
+                            {(() => {
+                                const err = getLastMusicRequestError();
+                                return err
+                                    ? <div style={{ color: "#c0392b" }}>最近失败：{err.scope} @ {err.at}{"\n"}{err.message}</div>
+                                    : <div>最近失败：无</div>;
+                            })()}
+                        </div>
+                    </div>
+                )}
 
                 <div className="music-settings-actions">
                     <button className="music-settings-btn" onClick={handleTest} disabled={testing}>
