@@ -9,7 +9,15 @@ import { Agent } from "undici";
  * 也一样失败。因此音乐请求统一经本站服务端转发。
  */
 
-export const DEFAULT_UPSTREAM = "http://127.0.0.1:4001";
+/**
+ * 同机部署时的回退地址。
+ *
+ * 必须是 **https**：NeteaseCloudMusicApi 常挂在只收 HTTPS 的端口后面——实测
+ * http://…:4001 会被 nginx 以 400 "plain HTTP request was sent to HTTPS port"
+ * 拒绝，在界面上表现为代理「地址可达但接口异常」。证书多为自签名，由
+ * upstreamDispatcher() 关掉校验，所以走回环也能连上。
+ */
+export const DEFAULT_UPSTREAM = "https://127.0.0.1:4001";
 
 /**
  * 客户端用这个头把「我自己填的 API 地址」带上来。
@@ -90,12 +98,28 @@ export function sanitizeClientBase(raw: string | null): string | null {
  *   2. 服务端 NETEASE_API_BASE
  *   3. NEXT_PUBLIC_DEFAULT_NETEASE_API_BASE
  *   4. 本机回环默认值
+ *
+ * 同时返回来源，供 netease-info 暴露出来——排查「地址到底从哪来的」时，
+ * 光看地址本身分不清是客户端送来的还是服务端回退的。
  */
+export type UpstreamResolution = {
+    baseUrl: string;
+    source: "client-header" | "client-header-rejected" | "env" | "default";
+};
+
+export function resolveUpstreamWithSource(clientBase: string | null): UpstreamResolution {
+    const sanitized = sanitizeClientBase(clientBase);
+    if (sanitized) return { baseUrl: sanitized, source: "client-header" };
+    // 带了头但没通过校验，单独标出来——这通常意味着内网地址被挡了
+    const rejected = Boolean(clientBase && clientBase.trim());
+
+    const fromEnv = (process.env.NETEASE_API_BASE || process.env.NEXT_PUBLIC_DEFAULT_NETEASE_API_BASE || "").trim();
+    if (fromEnv) {
+        return { baseUrl: fromEnv.replace(/\/+$/, ""), source: rejected ? "client-header-rejected" : "env" };
+    }
+    return { baseUrl: DEFAULT_UPSTREAM, source: rejected ? "client-header-rejected" : "default" };
+}
+
 export function resolveUpstreamBase(clientBase: string | null): string {
-    const fromClient = sanitizeClientBase(clientBase);
-    if (fromClient) return fromClient;
-    const raw = process.env.NETEASE_API_BASE
-        || process.env.NEXT_PUBLIC_DEFAULT_NETEASE_API_BASE
-        || DEFAULT_UPSTREAM;
-    return raw.trim().replace(/\/+$/, "");
+    return resolveUpstreamWithSource(clientBase).baseUrl;
 }

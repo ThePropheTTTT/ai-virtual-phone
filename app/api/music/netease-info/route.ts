@@ -3,7 +3,7 @@ import { fetch as undiciFetch } from "undici";
 
 import {
     CLIENT_BASE_HEADER,
-    resolveUpstreamBase,
+    resolveUpstreamWithSource,
     upstreamDispatcher,
 } from "@/lib/server/netease-upstream";
 
@@ -12,18 +12,22 @@ import {
  *
  * 上游地址的解析与代理路由共用同一份逻辑（含客户端传入地址的安全校验），
  * 保证「测试连接」的结论与真实转发一致。
+ *
+ * 额外返回 source 字段，说明地址来自客户端请求头还是服务端回退——排查
+ * 「到底哪一环没生效」时，只看地址本身分不清。
  */
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
 export async function GET(request: NextRequest) {
-    const baseUrl = resolveUpstreamBase(request.headers.get(CLIENT_BASE_HEADER));
+    const { baseUrl, source } = resolveUpstreamWithSource(request.headers.get(CLIENT_BASE_HEADER));
     if (!baseUrl) {
         return NextResponse.json({
             configured: false,
             reachable: false,
             baseUrl: "",
+            source,
             message: "未拿到上游地址：请在音乐设置里填写 API 地址，或设置服务端 NETEASE_API_BASE。",
         });
     }
@@ -39,6 +43,7 @@ export async function GET(request: NextRequest) {
                 configured: true,
                 reachable: false,
                 baseUrl,
+                source,
                 message: `上游返回 HTTP ${probe.status}（地址可达但接口异常）`,
             });
         }
@@ -48,6 +53,7 @@ export async function GET(request: NextRequest) {
             configured: true,
             reachable: hasResult,
             baseUrl,
+            source,
             message: hasResult ? "连接成功" : "上游返回格式异常",
         });
     } catch (error) {
@@ -56,6 +62,7 @@ export async function GET(request: NextRequest) {
             configured: true,
             reachable: false,
             baseUrl,
+            source,
             message: `无法连接上游（${baseUrl}）：${detail}`,
         });
     }

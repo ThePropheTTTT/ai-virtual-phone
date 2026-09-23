@@ -1500,13 +1500,22 @@ function PlaylistsTab({ player, formatTime, onPlayNetease, onPlayAll, activePlay
 }
 
 // ── Settings Tab ──
+
+/** 上游地址来源的中文说明，排查「地址到底从哪来」时直接显示给用户 */
+const SOURCE_LABELS: Record<string, string> = {
+    "client-header": "浏览器填写的地址",
+    "client-header-rejected": "浏览器地址被安全策略拒绝，已回退",
+    env: "服务端环境变量",
+    default: "服务端同机回环",
+};
+
 function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: () => void }) {
     const [config, setConfig] = useState<MusicApiConfig>(() => loadMusicApiConfig());
     const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
     const [testing, setTesting] = useState(false);
     // 服务端代理状态：走代理时上游地址在服务端，需要异步取回来展示
     const proxied = isNeteaseProxied();
-    const [proxyInfo, setProxyInfo] = useState<{ baseUrl: string; configured: boolean; reachable: boolean; message: string } | null>(null);
+    const [proxyInfo, setProxyInfo] = useState<Awaited<ReturnType<typeof getNeteaseProxyInfo>> | null>(null);
     const [mounted, setMounted] = useState(false);
 
     // QR login state
@@ -1686,14 +1695,19 @@ function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: ()
                     {proxied ? (
                         <>
                             <div className="music-settings-hint">
-                                由服务端代理转发。上游地址在服务端环境变量里配置（NETEASE_API_BASE），
-                                浏览器不直连，因此自签名证书也能正常工作。
+                                由服务端代理转发，浏览器不直连，因此自签名证书也能正常工作。
+                                上游地址优先取你在下面填的地址，没有则用服务端 NETEASE_API_BASE。
                             </div>
                             {mounted && (
                                 <div className="music-settings-hint" style={{ marginTop: 6, wordBreak: "break-all" }}>
                                     {proxyInfo
-                                        ? `当前上游：${proxyInfo.baseUrl || "(未配置)"}`
+                                        ? `当前上游：${proxyInfo.baseUrl || "(未配置)"}　来源：${SOURCE_LABELS[proxyInfo.source || ""] || proxyInfo.source || "未知"}`
                                         : "正在读取服务端配置..."}
+                                </div>
+                            )}
+                            {mounted && proxyInfo && !proxyInfo.reachable && (
+                                <div className="music-settings-hint" style={{ marginTop: 6, wordBreak: "break-all", color: "#c0392b" }}>
+                                    {proxyInfo.message}
                                 </div>
                             )}
                         </>

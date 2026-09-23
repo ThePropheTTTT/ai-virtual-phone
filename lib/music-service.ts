@@ -112,11 +112,34 @@ function withNeteaseParams(url: string): string {
  */
 const NETEASE_BASE_HEADER = "x-netease-base";
 
+/**
+ * 推断一个「服务端大概率能访问到」的上游地址。
+ *
+ * 场景：NeteaseCloudMusicApi 与小手机装在同一台机器上，但 nginx 可能只监听公网
+ * 网卡而不听回环——服务端按 127.0.0.1 连就会失败。这时用浏览器正在访问的主机名
+ * 加上同协议、4001 端口，通常正好命中。
+ *
+ * 仅在用户没填地址时使用；用户填了就以用户填的为准。
+ */
+function inferSameHostBase(): string {
+    if (typeof window === "undefined") return "";
+    try {
+        const { protocol, hostname, port } = window.location;
+        if (!hostname) return "";
+        // 小手机自己就跑在 4001 上时不猜（那是站点端口，不是 API 端口）
+        if (port === "4001") return "";
+        return `${protocol}//${hostname}:4001`;
+    } catch {
+        return "";
+    }
+}
+
 function musicFetchInit(): RequestInit | undefined {
     if (NETEASE_DIRECT_MODE) return undefined;
-    const raw = normalizeMusicApiBaseUrl(loadMusicApiConfig().baseUrl);
-    if (!raw) return undefined;
-    return { headers: { [NETEASE_BASE_HEADER]: raw } };
+    const configured = normalizeMusicApiBaseUrl(loadMusicApiConfig().baseUrl);
+    const target = configured || inferSameHostBase();
+    if (!target) return undefined;
+    return { headers: { [NETEASE_BASE_HEADER]: target } };
 }
 
 // ── Netease API Types ──
@@ -247,7 +270,14 @@ function resolveNeteaseRequestBase(baseUrl: string): string {
 }
 
 /** 服务端代理实际使用的上游地址，供设置界面展示与连接测试。 */
-export async function getNeteaseProxyInfo(): Promise<{ baseUrl: string; configured: boolean; reachable: boolean; message: string }> {
+export async function getNeteaseProxyInfo(): Promise<{
+    baseUrl: string;
+    configured: boolean;
+    reachable: boolean;
+    message: string;
+    /** 地址来源：client-header=浏览器带上来的 / env=服务端环境变量 / default=同机回环回退 */
+    source?: string;
+}> {
     try {
         // 同样带上用户填写的地址，使探测结论与真实转发一致
         const resp = await fetch("/api/music/netease-info", {
@@ -263,6 +293,7 @@ export async function getNeteaseProxyInfo(): Promise<{ baseUrl: string; configur
             configured: data.configured !== false,
             reachable: data.reachable === true,
             message: String(data.message || ""),
+            source: data.source ? String(data.source) : undefined,
         };
     } catch (error) {
         return {
