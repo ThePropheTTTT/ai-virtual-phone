@@ -101,43 +101,57 @@ function withNeteaseParams(url: string): string {
 }
 
 /**
- * 走服务端代理时，把「用户填写的 API 地址」随请求带给服务端。
+ * 走服务端代理时，把「设置里填的 API 地址」随请求带给服务端。
  *
- * 为什么需要：.env.local 是 gitignore 的，本地配好的 NETEASE_API_BASE 不会同步到
- * 部署的服务器，服务器上代理就会回退到回环地址而连不上——表现为「本地正常、线上
- * 跟没改一样」。让浏览器把地址带上来就不依赖任何部署时配置。
+ * 为什么需要：`.env.local` 是 gitignore 的，本地配好的 NETEASE_API_BASE 不会同步到
+ * 部署的服务器，服务器上代理就无从得知上游在哪——表现为「本地正常、线上跟没改一样」。
+ * 让浏览器把设置里的值带上来，就不依赖任何部署时配置，用户也能在界面上随时改。
  *
- * 服务端会用 sanitizeClientBase 校验（挡内网/云元数据地址），不通过就回退到
- * 它自己的环境变量。
+ * 服务端会用 sanitizeClientBase 校验（挡内网/云元数据地址）；不通过或为空时，
+ * 回退到服务端环境变量，再不行就从请求 Host 推导（见 lib/server/netease-upstream.ts）。
  */
 const NETEASE_BASE_HEADER = "x-netease-base";
 
 /**
- * 推断一个「服务端大概率能访问到」的上游地址。
- *
- * 场景：NeteaseCloudMusicApi 与小手机装在同一台机器上，但 nginx 可能只监听公网
- * 网卡而不听回环——服务端按 127.0.0.1 连就会失败。这时用浏览器正在访问的主机名
- * 加上同协议、4001 端口，通常正好命中。
- *
- * 仅在用户没填地址时使用；用户填了就以用户填的为准。
+ * 推导上游端口。默认 4001 只是「同机部署常见取值」，不是写死的约束——
+ * 上游换端口就配 NEXT_PUBLIC_NETEASE_API_PORT，无需改代码。
  */
-function inferSameHostBase(): string {
+const NETEASE_DERIVE_PORT = (process.env.NEXT_PUBLIC_NETEASE_API_PORT || "4001").trim() || "4001";
+
+/**
+ * 推断一个「服务端大概率能访问到」的上游地址，作为设置输入框的默认值。
+ *
+ * 场景：NeteaseCloudMusicApi 与小手机同机部署。用浏览器正在访问的主机名换上上游
+ * 端口通常正好命中，也避免服务端去连可能没监听的回环地址。
+ *
+ * 这只是**默认值**——用户可以在设置里改成任何地址，改了就以填的为准。
+ */
+export function inferSameHostBase(): string {
     if (typeof window === "undefined") return "";
     try {
         const { protocol, hostname, port } = window.location;
         if (!hostname) return "";
-        // 小手机自己就跑在 4001 上时不猜（那是站点端口，不是 API 端口）
-        if (port === "4001") return "";
-        return `${protocol}//${hostname}:4001`;
+        // 小手机自己就跑在上游端口上时不猜（那是站点端口，不是上游）
+        if (port === NETEASE_DERIVE_PORT) return "";
+        const hostPart = hostname.includes(":") ? `[${hostname}]` : hostname;
+        return `${protocol}//${hostPart}:${NETEASE_DERIVE_PORT}`;
     } catch {
         return "";
     }
 }
 
+/**
+ * 设置里该显示什么地址：用户填过就用填的，没填就给出推导出的默认值。
+ * 设置界面用它做初始值，避免输入框空白让人以为「没配置」。
+ */
+export function resolveSettingsBaseUrl(): string {
+    const configured = normalizeMusicApiBaseUrl(loadMusicApiConfig().baseUrl);
+    return configured || inferSameHostBase();
+}
+
 function musicFetchInit(): RequestInit | undefined {
     if (NETEASE_DIRECT_MODE) return undefined;
-    const configured = normalizeMusicApiBaseUrl(loadMusicApiConfig().baseUrl);
-    const target = configured || inferSameHostBase();
+    const target = resolveSettingsBaseUrl();
     if (!target) return undefined;
     return { headers: { [NETEASE_BASE_HEADER]: target } };
 }

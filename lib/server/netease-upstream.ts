@@ -7,24 +7,32 @@ import { Agent } from "undici";
  * 跑 HTTPS（或只在内网可达），而浏览器对 fetch 发起的跨域请求**不提供「忽略证书
  * 警告」的选项**——证书不受信或 SAN 与访问地址不一致时请求直接被拒，CORS 配好了
  * 也一样失败。因此音乐请求统一经本站服务端转发。
+ *
+ * 这里**不写死任何上游地址**（见 resolveUpstreamWithSource 的三层解析）。
+ * 唯一与「4001」有关的是 NETEASE_API_DERIVE_PORT，且它是可配的环境变量。
  */
 
 /**
- * 同机部署时的回退地址。
- *
- * 必须是 **https**：NeteaseCloudMusicApi 常挂在只收 HTTPS 的端口后面——实测
- * http://…:4001 会被 nginx 以 400 "plain HTTP request was sent to HTTPS port"
- * 拒绝，在界面上表现为代理「地址可达但接口异常」。证书多为自签名，由
- * upstreamDispatcher() 关掉校验，所以走回环也能连上。
+ * 取请求自身的 Host 与协议，供「从请求推导上游地址」使用。
+ * 经 nginx 等反代后原始 Host 在转发头里，所以优先读 x-forwarded-*。
  */
-export const DEFAULT_UPSTREAM = "https://127.0.0.1:4001";
+export function requestOriginInfo(request: {
+    headers: { get(name: string): string | null };
+    nextUrl: { protocol: string };
+}): { host: string | null; protocol: string } {
+    const host = request.headers.get("x-forwarded-host") || request.headers.get("host");
+    const forwardedProto = request.headers.get("x-forwarded-proto");
+    const protocol = forwardedProto
+        ? `${forwardedProto.split(",")[0].trim()}:`
+        : request.nextUrl.protocol;
+    return { host, protocol };
+}
 
 /**
- * 客户端用这个头把「我自己填的 API 地址」带上来。
+ * 客户端用这个头把「设置里填的 API 地址」带上来。
  *
- * 为什么需要：服务端环境变量（.env.local）是 gitignore 的，本地配好不会同步到
- * 部署的服务器，服务器上代理就会回退到回环地址而连不上——表现为「本地好的、
- * 线上跟没改一样」。让客户端把地址带上来，就不依赖任何部署时配置。
+ * 这是首选来源：`.env.local` 是 gitignore 的，本地配好不会同步到部署的服务器，
+ * 所以让浏览器把用户在设置里填的值带上，就不依赖任何部署时配置。
  */
 export const CLIENT_BASE_HEADER = "x-netease-base";
 
@@ -93,33 +101,139 @@ export function sanitizeClientBase(raw: string | null): string | null {
 }
 
 /**
- * 上游地址优先级：
- *   1. 客户端带来的地址（前提：通过了上面的安全校验）
- *   2. 服务端 NETEASE_API_BASE
- *   3. NEXT_PUBLIC_DEFAULT_NETEASE_API_BASE
- *   4. 本机回环默认值
+ * 校验「由请求 Host 推导出来的」地址。
  *
- * 同时返回来源，供 netease-info 暴露出来——排查「地址到底从哪来的」时，
- * 光看地址本身分不清是客户端送来的还是服务端回退的。
+ * 与 sanitizeClientBase 的区别：推导用的 Host 来自**请求本身**，没有攻击者能控制它
+ * （能改 Host 的人本来就能直接访问服务器），所以不必按客户端输入那样严苛。
+ *
+ * 但有一类必须放行、sanitizeClientBase 却会挡掉的：**回环地址**。
+ * 上游与站点同机部署时它就是 http://127.0.0.1:4001 / http://localhost:4001，
+ * 这是最常见的情形，挡掉等于这个回退层永远不生效。
+ *
+ * 仍然挡住私网段与云元数据／组播地址——保留它们是无谓地把内部拓扑暴露给上游跳转。
  */
-export type UpstreamResolution = {
-    baseUrl: string;
-    source: "client-header" | "client-header-rejected" | "env" | "default";
-};
-
-export function resolveUpstreamWithSource(clientBase: string | null): UpstreamResolution {
-    const sanitized = sanitizeClientBase(clientBase);
-    if (sanitized) return { baseUrl: sanitized, source: "client-header" };
-    // 带了头但没通过校验，单独标出来——这通常意味着内网地址被挡了
-    const rejected = Boolean(clientBase && clientBase.trim());
-
-    const fromEnv = (process.env.NETEASE_API_BASE || process.env.NEXT_PUBLIC_DEFAULT_NETEASE_API_BASE || "").trim();
-    if (fromEnv) {
-        return { baseUrl: fromEnv.replace(/\/+$/, ""), source: rejected ? "client-header-rejected" : "env" };
+function isAcceptableDerivedBase(candidate: string): boolean {
+    let url: URL;
+    try {
+        url = new URL(candidate);
+    } catch {
+        return false;
     }
-    return { baseUrl: DEFAULT_UPSTREAM, source: rejected ? "client-header-rejected" : "default" };
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+
+    // 回环：允许（同机部署的常态）
+    if (host === "localhost" || host === "::1" || host === "0:0:0:0:0:0:0:1") return true;
+
+    const parts = host.split(".").map(Number);
+    const isIpv4 = parts.length === 4 && parts.every(n => Number.isInteger(n) && n >= 0 && n <= 255);
+    if (isIpv4) {
+        // 127.0.0.0/8 之外，其余非公网段一律拒绝
+        if (parts[0] === 127) return true;
+        return !(
+            parts[0] === 0
+            || parts[0] === 10
+            || (parts[0] === 169 && parts[1] === 254)
+            || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
+            || (parts[0] === 192 && parts[1] === 168)
+            || (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127)
+            || parts[0] >= 224
+        );
+    }
+
+    if (host.includes(":")) {
+        // IPv6：回环已在上面放行，其余本地/组播段拒绝
+        return !(host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80") || host.startsWith("ff"));
+    }
+
+    // 普通域名
+    return !(host.endsWith(".local") || host.endsWith(".internal"));
 }
 
-export function resolveUpstreamBase(clientBase: string | null): string {
-    return resolveUpstreamWithSource(clientBase).baseUrl;
+/**
+ * 上游地址解析。**没有任何写死的地址**，三层依次回退：
+ *
+ *   1. `settings`  客户端设置里填的地址（x-netease-base 头）——用户显式指定，优先级最高
+ *   2. `env`       服务端 NETEASE_API_BASE / NEXT_PUBLIC_DEFAULT_NETEASE_API_BASE
+ *   3. `derived`   从本次请求的 Host 推导：同协议 + 可配端口（默认 4001）
+ *
+ * 第 3 层是为了「零配置也能用」：小手机与 NeteaseCloudMusicApi 常同机部署，
+ * 用浏览器正在访问的主机名换掉端口通常正好命中，且不依赖任何环境变量。
+ *
+ * 同时返回 source，供 netease-info 暴露——排查「地址到底从哪来」时，
+ * 光看地址本身分不清是用户填的、环境变量给的、还是推导出来的。
+ */
+export type UpstreamSource = "settings" | "settings-rejected" | "env" | "derived";
+
+export type UpstreamResolution = {
+    baseUrl: string;
+    source: UpstreamSource;
+};
+
+/** 推导时替换成的端口；上游换了端口就配这个，不用改代码。 */
+function derivedPort(): string {
+    return (process.env.NETEASE_API_DERIVE_PORT || "4001").trim() || "4001";
+}
+
+/**
+ * 用请求自身的 Host 推导上游地址：保留协议，把端口换成上游端口。
+ *
+ * 例：请求来自 http://localhost:3001、上游端口 4001
+ *     → http://localhost:4001
+ *     请求来自 https://phone.example.com
+ *     → https://phone.example.com:4001
+ * 请求本身就跑在上游端口上时不推导（那是站点端口，不是上游）。
+ */
+function deriveFromRequestHost(requestHost: string | null, protocol: string): string {
+    const raw = (requestHost || "").trim();
+    if (!raw) return "";
+    const port = derivedPort();
+    try {
+        const parsed = new URL(`${protocol}//${raw}`);
+        const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+        if (!hostname) return "";
+        if (parsed.port === port) return "";
+        // IPv6 字面量要重新加回方括号
+        const hostPart = hostname.includes(":") ? `[${hostname}]` : hostname;
+        const candidate = `${parsed.protocol}//${hostPart}:${port}`;
+        // 推导来源用宽松校验（见 isAcceptableDerivedBase）：
+        // 回环是允许的，这里正是最常见的同机部署形态。
+        return isAcceptableDerivedBase(candidate) ? candidate : "";
+    } catch {
+        return "";
+    }
+}
+
+export function resolveUpstreamWithSource(
+    clientBase: string | null,
+    requestHost?: string | null,
+    protocol?: string,
+): UpstreamResolution {
+    // 1. 用户设置
+    const sanitized = sanitizeClientBase(clientBase);
+    if (sanitized) return { baseUrl: sanitized, source: "settings" };
+    // 带了值但没通过校验，单独标出来——通常是内网地址被安全策略挡了
+    const rejected = Boolean(clientBase && clientBase.trim());
+
+    // 2. 服务端环境变量
+    const fromEnv = (process.env.NETEASE_API_BASE || process.env.NEXT_PUBLIC_DEFAULT_NETEASE_API_BASE || "").trim();
+    if (fromEnv) {
+        return {
+            baseUrl: fromEnv.replace(/\/+$/, ""),
+            source: rejected ? "settings-rejected" : "env",
+        };
+    }
+
+    // 3. 从请求 Host 推导
+    const derived = deriveFromRequestHost(requestHost || null, protocol || "http:");
+    return { baseUrl: derived, source: rejected ? "settings-rejected" : "derived" };
+}
+
+export function resolveUpstreamBase(
+    clientBase: string | null,
+    requestHost?: string | null,
+    protocol?: string,
+): string {
+    return resolveUpstreamWithSource(clientBase, requestHost, protocol).baseUrl;
 }

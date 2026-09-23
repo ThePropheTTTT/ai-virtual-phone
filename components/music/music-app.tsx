@@ -13,7 +13,7 @@ import {
     isNeteaseConfigured, loadMusicApiConfig, saveMusicApiConfig,
     searchNetease, getNeteasePlayInfo, getNeteaseLyrics, getNeteaseSongDetail,
     testNeteaseConnection, getQrKey, getQrImage, checkQrStatus, checkLoginStatus,
-    isNeteaseProxied, getNeteaseProxyInfo,
+    isNeteaseProxied, getNeteaseProxyInfo, inferSameHostBase,
     getUserPlaylists, getPlaylistTracks, saveNeteaseCookie, clearNeteaseCookie,
     getDailyRecommendSongs, getHotSearchDetail, getPersonalizedPlaylists,
     getRecommendResource, getToplists, getUserRecordWithCounts,
@@ -1503,14 +1503,18 @@ function PlaylistsTab({ player, formatTime, onPlayNetease, onPlayAll, activePlay
 
 /** 上游地址来源的中文说明，排查「地址到底从哪来」时直接显示给用户 */
 const SOURCE_LABELS: Record<string, string> = {
-    "client-header": "浏览器填写的地址",
-    "client-header-rejected": "浏览器地址被安全策略拒绝，已回退",
-    env: "服务端环境变量",
-    default: "服务端同机回环",
+    settings: "你在设置里填的地址",
+    "settings-rejected": "你填的地址被安全策略拒绝，已回退",
+    env: "服务端环境变量 NETEASE_API_BASE",
+    derived: "按当前访问地址自动推导",
 };
 
 function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: () => void }) {
-    const [config, setConfig] = useState<MusicApiConfig>(() => loadMusicApiConfig());
+    // 初始值：用户填过就用填的，没填则给推导出的默认值，避免输入框空白
+    const [config, setConfig] = useState<MusicApiConfig>(() => {
+        const loaded = loadMusicApiConfig();
+        return { ...loaded, baseUrl: loaded.baseUrl.trim() || "" };
+    });
     const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
     const [testing, setTesting] = useState(false);
     // 服务端代理状态：走代理时上游地址在服务端，需要异步取回来展示
@@ -1589,6 +1593,11 @@ function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: ()
     // Check login status on mount when API is configured
     useEffect(() => {
         setMounted(true);
+        // 输入框的默认值要等挂载后填，否则服务端渲染与客户端首帧不一致（hydration 报警）
+        if (!config.baseUrl.trim()) {
+            const inferred = proxied ? inferSameHostBase() : "";
+            if (inferred) setConfig(prev => ({ ...prev, baseUrl: inferred }));
+        }
         if (proxied) {
             // 走服务端代理：把服务端实际使用的上游地址取回来，答不出也不挡用户
             getNeteaseProxyInfo().then(setProxyInfo).catch(() => undefined);
@@ -1692,35 +1701,29 @@ function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: ()
             <div className="music-settings-body">
                 <div className="music-settings-section">
                     <div className="music-settings-label">网易云 API 地址</div>
-                    {proxied ? (
-                        <>
-                            <div className="music-settings-hint">
-                                由服务端代理转发，浏览器不直连，因此自签名证书也能正常工作。
-                                上游地址优先取你在下面填的地址，没有则用服务端 NETEASE_API_BASE。
-                            </div>
-                            {mounted && (
-                                <div className="music-settings-hint" style={{ marginTop: 6, wordBreak: "break-all" }}>
-                                    {proxyInfo
-                                        ? `当前上游：${proxyInfo.baseUrl || "(未配置)"}　来源：${SOURCE_LABELS[proxyInfo.source || ""] || proxyInfo.source || "未知"}`
-                                        : "正在读取服务端配置..."}
-                                </div>
-                            )}
-                            {mounted && proxyInfo && !proxyInfo.reachable && (
-                                <div className="music-settings-hint" style={{ marginTop: 6, wordBreak: "break-all", color: "#c0392b" }}>
-                                    {proxyInfo.message}
-                                </div>
-                            )}
-                        </>
-                    ) : (
-                        <>
-                            <div className="music-settings-hint">已开启浏览器直连模式，填写你的 NeteaseCloudMusicApi 地址</div>
-                            <input
-                                className="music-settings-input"
-                                placeholder="https://your-api.example.com"
-                                value={config.baseUrl}
-                                onChange={(e) => setConfig(prev => ({ ...prev, baseUrl: e.target.value }))}
-                            />
-                        </>
+                    <div className="music-settings-hint">
+                        {proxied
+                            ? "填你的 NeteaseCloudMusicApi 地址。请求经本站服务端转发，浏览器不直连，所以自签名证书也能用。留空则自动推导。"
+                            : "已开启浏览器直连模式（NEXT_PUBLIC_NETEASE_MUSIC_DIRECT=true），直连需上游证书受信任且配好 CORS。"}
+                    </div>
+                    {/* 代理模式下这个值会作为首选上游地址随请求带上；两种模式都允许编辑 */}
+                    <input
+                        className="music-settings-input"
+                        placeholder={proxied ? "https://your-host:4001" : "https://your-api.example.com"}
+                        value={config.baseUrl}
+                        onChange={(e) => setConfig(prev => ({ ...prev, baseUrl: e.target.value }))}
+                    />
+                    {proxied && mounted && (
+                        <div className="music-settings-hint" style={{ marginTop: 6, wordBreak: "break-all" }}>
+                            {proxyInfo
+                                ? `实际使用：${proxyInfo.baseUrl || "(未取到)"}　来源：${SOURCE_LABELS[proxyInfo.source || ""] || proxyInfo.source || "未知"}`
+                                : "正在读取服务端状态..."}
+                        </div>
+                    )}
+                    {proxied && mounted && proxyInfo && !proxyInfo.reachable && (
+                        <div className="music-settings-hint" style={{ marginTop: 6, wordBreak: "break-all", color: "#c0392b" }}>
+                            {proxyInfo.message}
+                        </div>
                     )}
                 </div>
 
@@ -1728,11 +1731,9 @@ function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: ()
                     <button className="music-settings-btn" onClick={handleTest} disabled={testing}>
                         {testing ? "测试中..." : "测试连接"}
                     </button>
-                    {!proxied && (
-                        <button className="music-settings-btn music-settings-btn-primary" onClick={handleSave}>
-                            保存
-                        </button>
-                    )}
+                    <button className="music-settings-btn music-settings-btn-primary" onClick={handleSave}>
+                        保存
+                    </button>
                 </div>
 
                 {testResult && (

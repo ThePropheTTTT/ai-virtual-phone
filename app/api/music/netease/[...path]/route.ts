@@ -3,6 +3,7 @@ import { fetch as undiciFetch } from "undici";
 
 import {
     CLIENT_BASE_HEADER,
+    requestOriginInfo,
     resolveUpstreamBase,
     upstreamDispatcher,
 } from "@/lib/server/netease-upstream";
@@ -36,7 +37,8 @@ export async function OPTIONS() {
 }
 
 async function forward(request: NextRequest, path: string[]): Promise<Response> {
-    const upstreamBase = resolveUpstreamBase(request.headers.get(CLIENT_BASE_HEADER));
+    const { host, protocol } = requestOriginInfo(request);
+    const upstreamBase = resolveUpstreamBase(request.headers.get(CLIENT_BASE_HEADER), host, protocol);
     if (!upstreamBase) {
         return NextResponse.json(
             {

@@ -3,6 +3,7 @@ import { fetch as undiciFetch } from "undici";
 
 import {
     CLIENT_BASE_HEADER,
+    requestOriginInfo,
     resolveUpstreamWithSource,
     upstreamDispatcher,
 } from "@/lib/server/netease-upstream";
@@ -13,15 +14,20 @@ import {
  * 上游地址的解析与代理路由共用同一份逻辑（含客户端传入地址的安全校验），
  * 保证「测试连接」的结论与真实转发一致。
  *
- * 额外返回 source 字段，说明地址来自客户端请求头还是服务端回退——排查
- * 「到底哪一环没生效」时，只看地址本身分不清。
+ * 额外返回 source 字段，说明地址是用户填的、环境变量给的、还是从请求 Host 推导的——
+ * 排查「到底哪一环没生效」时，只看地址本身分不清。
  */
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
 export async function GET(request: NextRequest) {
-    const { baseUrl, source } = resolveUpstreamWithSource(request.headers.get(CLIENT_BASE_HEADER));
+    const { host, protocol } = requestOriginInfo(request);
+    const { baseUrl, source } = resolveUpstreamWithSource(
+        request.headers.get(CLIENT_BASE_HEADER),
+        host,
+        protocol,
+    );
     if (!baseUrl) {
         return NextResponse.json({
             configured: false,
