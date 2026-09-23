@@ -52,7 +52,18 @@ export function saveMusicApiConfig(config: MusicApiConfig): void {
     } catch { /* ignore */ }
 }
 
+/** 是否走服务端代理（默认）。置 NEXT_PUBLIC_NETEASE_MUSIC_DIRECT=true 可恢复浏览器直连。 */
+export function isNeteaseProxied(): boolean {
+    return !NETEASE_DIRECT_MODE;
+}
+
+/**
+ * 在线音乐是否可用。
+ * 走代理时上游地址在服务端，浏览器侧无从判断可达性，因此这里一律视为「已配置」，
+ * 真正的可用性由设置界面的连接测试（getNeteaseProxyInfo）呈现。
+ */
 export function isNeteaseConfigured(): boolean {
+    if (isNeteaseProxied()) return true;
     const cfg = loadMusicApiConfig();
     return !!cfg.baseUrl.trim();
 }
@@ -189,16 +200,55 @@ function secureHttpUrl(url: string | undefined): string | undefined {
 
 // ── API Calls ──
 
+/**
+ * 浏览器侧统一走本站的服务端代理，不直连用户填写的 API 地址。
+ *
+ * 原因：自部署的 NeteaseCloudMusicApi 多用自签名证书或内网地址跑 HTTPS，浏览器对
+ * fetch 发起的跨域请求不给「忽略证书警告」的选项，证书不受信 / SAN 不匹配时直接失败
+ * （CORS 配好了也没用）。改由服务端转发后浏览器只请求本站，同源且不受证书策略约束。
+ *
+ * 需要临时恢复「浏览器直连」时，把 NEXT_PUBLIC_NETEASE_MUSIC_DIRECT=true 写进 .env.local 即可。
+ */
+const NETEASE_PROXY_PATH = "/api/music/netease";
+const NETEASE_DIRECT_MODE = process.env.NEXT_PUBLIC_NETEASE_MUSIC_DIRECT === "true";
+
 function neteaseBase(): string {
-    const cfg = loadMusicApiConfig();
-    const base = normalizeMusicApiBaseUrl(cfg.baseUrl);
-    if (!base) return "";
-    return base;
+    if (NETEASE_DIRECT_MODE) {
+        const direct = normalizeMusicApiBaseUrl(loadMusicApiConfig().baseUrl);
+        return direct;
+    }
+    return NETEASE_PROXY_PATH;
 }
 
 function resolveNeteaseRequestBase(baseUrl: string): string {
-    const base = normalizeMusicApiBaseUrl(baseUrl || DEFAULT_NETEASE_API_BASE);
-    return base;
+    if (NETEASE_DIRECT_MODE) {
+        return normalizeMusicApiBaseUrl(baseUrl || DEFAULT_NETEASE_API_BASE);
+    }
+    return NETEASE_PROXY_PATH;
+}
+
+/** 服务端代理实际使用的上游地址，供设置界面展示与连接测试。 */
+export async function getNeteaseProxyInfo(): Promise<{ baseUrl: string; configured: boolean; reachable: boolean; message: string }> {
+    try {
+        const resp = await fetch("/api/music/netease-info", { signal: AbortSignal.timeout(20000) });
+        const data = await resp.json().catch(() => null);
+        if (!resp.ok || !data) {
+            return { baseUrl: "", configured: false, reachable: false, message: data?.message || `HTTP ${resp.status}` };
+        }
+        return {
+            baseUrl: String(data.baseUrl || ""),
+            configured: data.configured !== false,
+            reachable: data.reachable === true,
+            message: String(data.message || ""),
+        };
+    } catch (error) {
+        return {
+            baseUrl: "",
+            configured: false,
+            reachable: false,
+            message: error instanceof Error ? error.message : "无法连接服务端代理",
+        };
+    }
 }
 
 /** Search songs via Netease API */
@@ -771,10 +821,24 @@ export async function removeTracksFromPlaylist(playlistId: number, trackIds: num
     }
 }
 
-/** Test Netease API connection */
+/**
+ * 测试网易云 API 连接。
+ * 走服务端代理时测的是「代理 → 上游」这条链路（浏览器直连上游已被证书问题堵死，
+ * 所以以前那种从浏览器探 baseUrl 的方式对自签名实例没有意义）。
+ * 仅在 NETEASE_MUSIC_DIRECT=true 的直连模式下才回退到浏览器直接探测。
+ */
 export async function testNeteaseConnection(baseUrl: string): Promise<{ ok: boolean; message: string }> {
+    if (!NETEASE_DIRECT_MODE) {
+        const info = await getNeteaseProxyInfo();
+        if (info.reachable) {
+            return { ok: true, message: `连接成功（服务端代理 → ${info.baseUrl}）` };
+        }
+        return { ok: false, message: info.message || "服务端代理连接失败" };
+    }
+
     try {
         const url = resolveNeteaseRequestBase(baseUrl);
+        if (!url) return { ok: false, message: "未配置 API 地址" };
         const resp = await fetch(withNeteaseParams(`${url}/search?keywords=test&limit=1`), { signal: AbortSignal.timeout(20000) });
         if (!resp.ok) return { ok: false, message: `HTTP ${resp.status}` };
         const data = await resp.json();

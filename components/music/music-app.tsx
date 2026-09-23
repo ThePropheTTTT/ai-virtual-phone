@@ -13,6 +13,7 @@ import {
     isNeteaseConfigured, loadMusicApiConfig, saveMusicApiConfig,
     searchNetease, getNeteasePlayInfo, getNeteaseLyrics, getNeteaseSongDetail,
     testNeteaseConnection, getQrKey, getQrImage, checkQrStatus, checkLoginStatus,
+    isNeteaseProxied, getNeteaseProxyInfo,
     getUserPlaylists, getPlaylistTracks, saveNeteaseCookie, clearNeteaseCookie,
     getDailyRecommendSongs, getHotSearchDetail, getPersonalizedPlaylists,
     getRecommendResource, getToplists, getUserRecordWithCounts,
@@ -742,8 +743,11 @@ function MineTab({ player, formatTime, onPlayNetease, onPlayAll, activePlaylist,
 
     useEffect(() => {
         let cancelled = false;
-        const cfg = loadMusicApiConfig();
-        if (!cfg.baseUrl.trim()) return;
+        // 走服务端代理时上游地址在服务端，浏览器侧不再以 baseUrl 判断是否加载
+        if (!isNeteaseProxied()) {
+            const cfg = loadMusicApiConfig();
+            if (!cfg.baseUrl.trim()) return;
+        }
         getUserRecordWithCounts(1).then(records => {
             if (cancelled) return;
             setWeekRecords(records);
@@ -1500,6 +1504,10 @@ function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: ()
     const [config, setConfig] = useState<MusicApiConfig>(() => loadMusicApiConfig());
     const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
     const [testing, setTesting] = useState(false);
+    // 服务端代理状态：走代理时上游地址在服务端，需要异步取回来展示
+    const proxied = isNeteaseProxied();
+    const [proxyInfo, setProxyInfo] = useState<{ baseUrl: string; configured: boolean; reachable: boolean; message: string } | null>(null);
+    const [mounted, setMounted] = useState(false);
 
     // QR login state
     const [qrImg, setQrImg] = useState<string | null>(null);
@@ -1571,6 +1579,12 @@ function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: ()
 
     // Check login status on mount when API is configured
     useEffect(() => {
+        setMounted(true);
+        if (proxied) {
+            // 走服务端代理：把服务端实际使用的上游地址取回来，答不出也不挡用户
+            getNeteaseProxyInfo().then(setProxyInfo).catch(() => undefined);
+            return;
+        }
         const base = config.baseUrl.trim();
         if (!base) return;
         checkLoginStatus(base).then(s => {
@@ -1578,7 +1592,7 @@ function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: ()
                 setLoginNickname(s.nickname);
             }
         });
-    }, [config.baseUrl]);
+    }, [config.baseUrl, proxied]);
 
     // Cleanup polling on unmount
     useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
@@ -1592,16 +1606,18 @@ function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: ()
     };
 
     const handleTest = async () => {
-        if (!config.baseUrl.trim()) return;
+        if (!proxied && !config.baseUrl.trim()) return;
         setTesting(true);
         setTestResult(null);
         const result = await testNeteaseConnection(config.baseUrl.trim());
         setTestResult(result);
+        if (proxied) getNeteaseProxyInfo().then(setProxyInfo).catch(() => undefined);
         setTesting(false);
     };
 
     const startQrLogin = async () => {
-        const base = config.baseUrl.trim();
+        // 走代理时上游在服务端，这里传什么都行——代理不接收客户端指定的地址
+        const base = proxied ? "proxy" : config.baseUrl.trim();
         if (!base) return;
         setQrStatus("获取二维码...");
         setQrImg(null);
@@ -1667,22 +1683,42 @@ function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: ()
             <div className="music-settings-body">
                 <div className="music-settings-section">
                     <div className="music-settings-label">网易云 API 地址</div>
-                    <div className="music-settings-hint">默认使用公共服务，也可以改成自己的 NeteaseCloudMusicApi 地址</div>
-                    <input
-                        className="music-settings-input"
-                        placeholder="https://your-api.vercel.app"
-                        value={config.baseUrl}
-                        onChange={(e) => setConfig(prev => ({ ...prev, baseUrl: e.target.value }))}
-                    />
+                    {proxied ? (
+                        <>
+                            <div className="music-settings-hint">
+                                由服务端代理转发。上游地址在服务端环境变量里配置（NETEASE_API_BASE），
+                                浏览器不直连，因此自签名证书也能正常工作。
+                            </div>
+                            {mounted && (
+                                <div className="music-settings-hint" style={{ marginTop: 6, wordBreak: "break-all" }}>
+                                    {proxyInfo
+                                        ? `当前上游：${proxyInfo.baseUrl || "(未配置)"}`
+                                        : "正在读取服务端配置..."}
+                                </div>
+                            )}
+                        </>
+                    ) : (
+                        <>
+                            <div className="music-settings-hint">已开启浏览器直连模式，填写你的 NeteaseCloudMusicApi 地址</div>
+                            <input
+                                className="music-settings-input"
+                                placeholder="https://your-api.example.com"
+                                value={config.baseUrl}
+                                onChange={(e) => setConfig(prev => ({ ...prev, baseUrl: e.target.value }))}
+                            />
+                        </>
+                    )}
                 </div>
 
                 <div className="music-settings-actions">
-                    <button className="music-settings-btn" onClick={handleTest} disabled={testing || !config.baseUrl.trim()}>
+                    <button className="music-settings-btn" onClick={handleTest} disabled={testing}>
                         {testing ? "测试中..." : "测试连接"}
                     </button>
-                    <button className="music-settings-btn music-settings-btn-primary" onClick={handleSave}>
-                        保存
-                    </button>
+                    {!proxied && (
+                        <button className="music-settings-btn music-settings-btn-primary" onClick={handleSave}>
+                            保存
+                        </button>
+                    )}
                 </div>
 
                 {testResult && (
@@ -1692,7 +1728,7 @@ function MusicSettingsTab({ onBack, onSaved }: { onBack: () => void; onSaved: ()
                 )}
 
                 {/* QR Login Section */}
-                {config.baseUrl.trim() && (
+                {(proxied || config.baseUrl.trim()) && (
                     <div className="music-settings-section music-qr-section">
                         <div className="music-settings-label">网易云账号登录</div>
                         <div className="music-settings-hint">登录后可播放 VIP 歌曲（需扫码）</div>
