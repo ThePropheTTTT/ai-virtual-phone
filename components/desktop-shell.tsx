@@ -1172,6 +1172,12 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     pointerId: number | null;
   }>({ startX: 0, startY: 0, deltaX: 0, locked: null, pointerId: null });
   const swipeLayerRef = useRef<HTMLDivElement | null>(null);
+  // 一页的宽度，在指针按下那一刻量一次并缓存。
+  // 不能在 handleSwipeMove 里现量：getBoundingClientRect() 会强制同步布局，而移动
+  // 处理器每帧都先写 --swipe-drag（使布局失效）再读它，于是形成 写→读→写 的
+  // layout thrashing，约 60 次/秒强制重算整棵 300% 宽层的样式（性能面板里表现为
+  // 翻页时「重新计算样式」占大头）。翻页期间视口宽度不会变，量一次就够。
+  const swipePageWidthRef = useRef(0);
 
   // ── Edit mode (long-press drag) ──
   const [editMode, setEditMode] = useState(false);
@@ -3683,6 +3689,11 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     return swipeLayerRef.current?.getBoundingClientRect().width || shellRef.current?.getBoundingClientRect().width || 390;
   }, []);
 
+  // 拖动/松手期间一律读缓存值；缓存为空时（理论上只在按下前发生）退回现量。
+  const swipePageWidth = useCallback(() => {
+    return swipePageWidthRef.current || getSwipePageWidth();
+  }, [getSwipePageWidth]);
+
   // Live finger offset while dragging — a transient CSS var so moving doesn't
   // re-render. Releasing sets it back to 0 and the CSS transition settles the page.
   const setSwipeDrag = useCallback((px: number) => {
@@ -3703,9 +3714,11 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     s.deltaX = 0;
     s.locked = null;
     s.pointerId = e.pointerId;
+    // 只在指针按下时做一次强制布局测量，之后整个拖拽过程都复用这个宽度。
+    swipePageWidthRef.current = getSwipePageWidth();
     // Suppress the settle transition for 1:1 finger tracking while dragging.
     swipeLayerRef.current?.classList.add("phone-swipe-dragging");
-  }, [activeApp, editMode]);
+  }, [activeApp, editMode, getSwipePageWidth]);
 
   // ── 状态栏颜色自适应：检测当前背景亮度 ──
   useEffect(() => {
@@ -3806,7 +3819,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     // Compute the pixel position from the committed page + finger delta, with
     // rubber-banding past the first/last page, then express it as an offset from
     // the current page's base (= the --swipe-drag CSS var).
-    const pageWidth = getSwipePageWidth();
+    const pageWidth = swipePageWidth();
     const page = currentPageIndexRef.current;
     let translateX = -page * pageWidth + dx;
     const minTranslateX = -Math.max(0, pageCount - 1) * pageWidth;
@@ -3815,7 +3828,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
 
     s.deltaX = dx;
     setSwipeDrag(translateX + page * pageWidth);
-  }, [editMode, getSwipePageWidth, pageCount, setSwipeDrag]);
+  }, [editMode, swipePageWidth, pageCount, setSwipeDrag]);
 
   const handleSwipeEnd = useCallback((e: React.PointerEvent) => {
     // Clear long-press
@@ -3851,7 +3864,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
 
     const dx = s.deltaX;
     s.deltaX = 0;
-    const pageWidth = getSwipePageWidth();
+    const pageWidth = swipePageWidth();
     const swipeThreshold = Math.max(SWIPE_MIN_THRESHOLD, pageWidth * SWIPE_THRESHOLD_RATIO);
 
     const page = currentPageIndexRef.current;
@@ -3865,7 +3878,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     swipeLayerRef.current?.classList.remove("phone-swipe-dragging");
     setSwipeDrag(0);
     if (targetPageIndex !== page) setCurrentPageIndex(targetPageIndex);
-  }, [editMode, getSwipePageWidth, pageCount, setSwipeDrag]);
+  }, [editMode, swipePageWidth, pageCount, setSwipeDrag]);
 
   const handleCloseXiaohongshu = useCallback((isBusy?: boolean) => {
     const shouldKeepMounted = isBusy ?? xiaohongshuBusy;
