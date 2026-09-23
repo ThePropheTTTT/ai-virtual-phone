@@ -100,6 +100,25 @@ function withNeteaseParams(url: string): string {
     }
 }
 
+/**
+ * 走服务端代理时，把「用户填写的 API 地址」随请求带给服务端。
+ *
+ * 为什么需要：.env.local 是 gitignore 的，本地配好的 NETEASE_API_BASE 不会同步到
+ * 部署的服务器，服务器上代理就会回退到回环地址而连不上——表现为「本地正常、线上
+ * 跟没改一样」。让浏览器把地址带上来就不依赖任何部署时配置。
+ *
+ * 服务端会用 sanitizeClientBase 校验（挡内网/云元数据地址），不通过就回退到
+ * 它自己的环境变量。
+ */
+const NETEASE_BASE_HEADER = "x-netease-base";
+
+function musicFetchInit(): RequestInit | undefined {
+    if (NETEASE_DIRECT_MODE) return undefined;
+    const raw = normalizeMusicApiBaseUrl(loadMusicApiConfig().baseUrl);
+    if (!raw) return undefined;
+    return { headers: { [NETEASE_BASE_HEADER]: raw } };
+}
+
 // ── Netease API Types ──
 
 export type NeteaseSearchResult = {
@@ -230,7 +249,11 @@ function resolveNeteaseRequestBase(baseUrl: string): string {
 /** 服务端代理实际使用的上游地址，供设置界面展示与连接测试。 */
 export async function getNeteaseProxyInfo(): Promise<{ baseUrl: string; configured: boolean; reachable: boolean; message: string }> {
     try {
-        const resp = await fetch("/api/music/netease-info", { signal: AbortSignal.timeout(20000) });
+        // 同样带上用户填写的地址，使探测结论与真实转发一致
+        const resp = await fetch("/api/music/netease-info", {
+            ...(musicFetchInit() as RequestInit | undefined),
+            signal: AbortSignal.timeout(20000),
+        });
         const data = await resp.json().catch(() => null);
         if (!resp.ok || !data) {
             return { baseUrl: "", configured: false, reachable: false, message: data?.message || `HTTP ${resp.status}` };
@@ -256,7 +279,7 @@ export async function searchNetease(query: string, limit = 20): Promise<NeteaseS
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/cloudsearch?keywords=${encodeURIComponent(query)}&limit=${limit}`));
+        const resp = await fetch(withNeteaseParams(`${base}/cloudsearch?keywords=${encodeURIComponent(query)}&limit=${limit}`), musicFetchInit());
         const data = await resp.json();
         const songs = data?.result?.songs;
         if (!Array.isArray(songs)) return [];
@@ -280,7 +303,7 @@ export async function getNeteasePlayInfo(songId: number): Promise<NeteasePlayInf
     const base = neteaseBase();
     if (!base) return { url: null, trial: false, reason: "音乐 API 未配置" };
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/song/url?id=${songId}`));
+        const resp = await fetch(withNeteaseParams(`${base}/song/url?id=${songId}`), musicFetchInit());
         const data = await resp.json();
         const d = data?.data?.[0];
         const url = d?.url;
@@ -299,7 +322,7 @@ export async function getNeteasePlayInfo(songId: number): Promise<NeteasePlayInf
         }
         // Ask check/music for a human-readable reason (e.g. 无版权)
         try {
-            const chk = await fetch(withNeteaseParams(`${base}/check/music?id=${songId}&timestamp=${Date.now()}`)).then(r => r.json());
+            const chk = await fetch(withNeteaseParams(`${base}/check/music?id=${songId}&timestamp=${Date.now()}`), musicFetchInit()).then(r => r.json());
             const msg = chk?.message ? String(chk.message).replace(/^亲爱的[,，]?/, "").trim() : "";
             if (chk?.success === false && msg) return { url: null, trial: false, reason: msg };
         } catch { /* check endpoint unavailable — fall through */ }
@@ -321,7 +344,7 @@ export async function getNeteaseLyrics(songId: number): Promise<string> {
     const base = neteaseBase();
     if (!base) return "";
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/lyric?id=${songId}`));
+        const resp = await fetch(withNeteaseParams(`${base}/lyric?id=${songId}`), musicFetchInit());
         const data = await resp.json();
         return data?.lrc?.lyric || "";
     } catch {
@@ -334,7 +357,7 @@ export async function getNeteaseSongDetail(songId: number): Promise<{ coverUrl?:
     const base = neteaseBase();
     if (!base) return null;
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/song/detail?ids=${songId}`));
+        const resp = await fetch(withNeteaseParams(`${base}/song/detail?ids=${songId}`), musicFetchInit());
         const data = await resp.json();
         const song = data?.songs?.[0];
         if (!song) return null;
@@ -355,7 +378,7 @@ export async function getNeteaseSongDetail(songId: number): Promise<{ coverUrl?:
 export async function getQrKey(baseUrl: string): Promise<string | null> {
     try {
         const url = resolveNeteaseRequestBase(baseUrl);
-        const resp = await fetch(withNeteaseParams(`${url}/login/qr/key?timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${url}/login/qr/key?timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return data?.data?.unikey || null;
     } catch { return null; }
@@ -364,7 +387,7 @@ export async function getQrKey(baseUrl: string): Promise<string | null> {
 export async function getQrImage(baseUrl: string, key: string): Promise<string | null> {
     try {
         const url = resolveNeteaseRequestBase(baseUrl);
-        const resp = await fetch(withNeteaseParams(`${url}/login/qr/create?key=${key}&qrimg=true&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${url}/login/qr/create?key=${key}&qrimg=true&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return data?.data?.qrimg || null;
     } catch { return null; }
@@ -374,7 +397,7 @@ export async function getQrImage(baseUrl: string, key: string): Promise<string |
 export async function checkQrStatus(baseUrl: string, key: string): Promise<{ code: number; message: string; nickname?: string; cookie?: string }> {
     try {
         const url = resolveNeteaseRequestBase(baseUrl);
-        const resp = await fetch(withNeteaseParams(`${url}/login/qr/check?key=${key}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${url}/login/qr/check?key=${key}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return { code: data?.code || 0, message: data?.message || "", nickname: data?.profile?.nickname, cookie: data?.cookie };
     } catch (e) {
@@ -386,7 +409,7 @@ export async function checkQrStatus(baseUrl: string, key: string): Promise<{ cod
 export async function checkLoginStatus(baseUrl: string): Promise<{ loggedIn: boolean; nickname?: string }> {
     try {
         const url = resolveNeteaseRequestBase(baseUrl);
-        const resp = await fetch(withNeteaseParams(`${url}/login/status?timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${url}/login/status?timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         const profile = data?.data?.profile;
         if (profile?.nickname) return { loggedIn: true, nickname: profile.nickname };
@@ -412,7 +435,7 @@ async function getLoginUid(): Promise<number | null> {
     const base = neteaseBase();
     if (!base) return null;
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/login/status?timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/login/status?timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return data?.data?.profile?.userId || null;
     } catch { return null; }
@@ -425,7 +448,7 @@ export async function getUserPlaylists(): Promise<NeteasePlaylist[]> {
     const uid = await getLoginUid();
     if (!uid) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/user/playlist?uid=${uid}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/user/playlist?uid=${uid}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return (data?.playlist || []).map((p: any) => ({
             id: p.id,
@@ -445,7 +468,7 @@ export async function getPlaylistTracks(playlistId: number): Promise<NeteaseSear
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/playlist/track/all?id=${playlistId}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/playlist/track/all?id=${playlistId}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return (data?.songs || []).map(mapSongToSearchResult);
     } catch { return []; }
@@ -455,7 +478,7 @@ export async function getDailyRecommendSongs(): Promise<NeteaseSearchResult[]> {
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/recommend/songs?timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/recommend/songs?timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         const songs = data?.data?.dailySongs || data?.recommend || [];
         return Array.isArray(songs) ? songs.map(mapSongToSearchResult) : [];
@@ -466,7 +489,7 @@ export async function getPersonalFm(): Promise<NeteaseSearchResult[]> {
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/personal_fm?timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/personal_fm?timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         const songs = data?.data || [];
         return Array.isArray(songs) ? songs.map(mapSongToSearchResult) : [];
@@ -477,7 +500,7 @@ export async function getPersonalizedPlaylists(limit = 12): Promise<NeteasePlayl
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/personalized?limit=${limit}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/personalized?limit=${limit}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return (data?.result || []).map((p: any) => ({
             id: p.id,
@@ -494,7 +517,7 @@ export async function getRecommendResource(): Promise<NeteasePlaylist[]> {
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/recommend/resource?timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/recommend/resource?timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return (data?.recommend || []).map((p: any) => ({
             id: p.id,
@@ -511,7 +534,7 @@ export async function getHotSearchDetail(): Promise<NeteaseHotSearch[]> {
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/search/hot/detail?timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/search/hot/detail?timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return (data?.data || []).map((item: any) => ({
             keyword: item.searchWord || item.keyword || "",
@@ -526,7 +549,7 @@ export async function getToplists(): Promise<NeteaseToplist[]> {
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/toplist/detail?timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/toplist/detail?timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return (data?.list || []).map((p: any) => ({
             id: p.id,
@@ -547,7 +570,7 @@ export async function getPlaylistDetail(playlistId: number): Promise<NeteasePlay
     const base = neteaseBase();
     if (!base) return null;
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/playlist/detail?id=${playlistId}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/playlist/detail?id=${playlistId}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         const p = data?.playlist;
         if (!p) return null;
@@ -596,7 +619,7 @@ export async function getSongCommentPage(songId: number, offset = 0, limit = 20,
     if (!base) return empty;
     try {
         const endpoint = resType === 2 ? "comment/playlist" : "comment/music";
-        const resp = await fetch(withNeteaseParams(`${base}/${endpoint}?id=${songId}&limit=${limit}&offset=${offset}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/${endpoint}?id=${songId}&limit=${limit}&offset=${offset}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         const mapList = (list: any) => (Array.isArray(list) ? list.map(mapComment).filter((c: NeteaseComment) => c.content) : []);
         return {
@@ -613,7 +636,7 @@ export async function getFloorComments(songId: number, parentCommentId: number, 
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/comment/floor?parentCommentId=${parentCommentId}&id=${songId}&type=${resType}&limit=${limit}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/comment/floor?parentCommentId=${parentCommentId}&id=${songId}&type=${resType}&limit=${limit}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         const comments = data?.data?.comments || [];
         return Array.isArray(comments) ? comments.map(mapComment).filter((c: NeteaseComment) => c.content) : [];
@@ -626,7 +649,7 @@ export async function postSongComment(songId: number, content: string, resType: 
     if (!base) return { ok: false, message: "API 未配置" };
     if (!loadNeteaseCookie()) return { ok: false, message: "发送评论需要先登录网易云账号" };
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/comment?t=1&type=${resType}&id=${songId}&content=${encodeURIComponent(content)}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/comment?t=1&type=${resType}&id=${songId}&content=${encodeURIComponent(content)}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         if (data?.code === 200) return { ok: true, message: "评论已发送" };
         return { ok: false, message: data?.message || data?.msg || "发送失败" };
@@ -641,7 +664,7 @@ export async function subscribePlaylist(playlistId: number, subscribe: boolean):
     if (!base) return { ok: false, message: "API 未配置" };
     if (!loadNeteaseCookie()) return { ok: false, message: "收藏歌单需要先登录网易云账号" };
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/playlist/subscribe?t=${subscribe ? 1 : 2}&id=${playlistId}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/playlist/subscribe?t=${subscribe ? 1 : 2}&id=${playlistId}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         if (data?.code === 200) return { ok: true, message: subscribe ? "已收藏歌单" : "已取消收藏" };
         if (data?.code === 501) return { ok: true, message: "已收藏过这个歌单" };
@@ -658,8 +681,8 @@ export async function getArtistDetail(artistId: number): Promise<NeteaseArtist |
     if (!base) return null;
     try {
         const [detailResp, fansResp] = await Promise.all([
-            fetch(withNeteaseParams(`${base}/artist/detail?id=${artistId}&timestamp=${Date.now()}`)).then(r => r.json()),
-            fetch(withNeteaseParams(`${base}/artist/follow/count?id=${artistId}&timestamp=${Date.now()}`)).then(r => r.json()).catch(() => null),
+            fetch(withNeteaseParams(`${base}/artist/detail?id=${artistId}&timestamp=${Date.now()}`), musicFetchInit()).then(r => r.json()),
+            fetch(withNeteaseParams(`${base}/artist/follow/count?id=${artistId}&timestamp=${Date.now()}`), musicFetchInit()).then(r => r.json()).catch(() => null),
         ]);
         const artist = detailResp?.data?.artist;
         if (!artist) return null;
@@ -679,7 +702,7 @@ export async function getArtistTopSongs(artistId: number): Promise<NeteaseSearch
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/artist/top/song?id=${artistId}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/artist/top/song?id=${artistId}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         const songs = data?.songs || [];
         return Array.isArray(songs) ? songs.map(mapSongToSearchResult) : [];
@@ -690,7 +713,7 @@ export async function getArtistAlbums(artistId: number, limit = 20): Promise<Net
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/artist/album?id=${artistId}&limit=${limit}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/artist/album?id=${artistId}&limit=${limit}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return (data?.hotAlbums || []).map((a: any) => ({
             id: a.id,
@@ -709,7 +732,7 @@ export async function getUserDetail(): Promise<NeteaseUserDetail | null> {
     const uid = await getLoginUid();
     if (!uid) return null;
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/user/detail?uid=${uid}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/user/detail?uid=${uid}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         const profile = data?.profile;
         if (!profile) return null;
@@ -740,7 +763,7 @@ export async function getUserRecordWithCounts(type: 0 | 1 = 1): Promise<NeteaseP
     const uid = await getLoginUid();
     if (!uid) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/user/record?uid=${uid}&type=${type}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/user/record?uid=${uid}&type=${type}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         const records = data?.weekData || data?.allData || [];
         if (!Array.isArray(records)) return [];
@@ -791,7 +814,7 @@ export async function addTracksToPlaylist(playlistId: number, trackIds: number[]
     const base = neteaseBase();
     if (!base) return { ok: false, message: "API 未配置" };
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/playlist/tracks?op=add&pid=${playlistId}&tracks=${trackIds.join(",")}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/playlist/tracks?op=add&pid=${playlistId}&tracks=${trackIds.join(",")}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         if (data?.body?.code === 200 || data?.status === 200 || data?.code === 200) {
             return { ok: true, message: "已添加到歌单" };
@@ -810,7 +833,7 @@ export async function removeTracksFromPlaylist(playlistId: number, trackIds: num
     const base = neteaseBase();
     if (!base) return { ok: false, message: "API 未配置" };
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/playlist/tracks?op=del&pid=${playlistId}&tracks=${trackIds.join(",")}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/playlist/tracks?op=del&pid=${playlistId}&tracks=${trackIds.join(",")}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         if (data?.body?.code === 200 || data?.status === 200 || data?.code === 200) {
             return { ok: true, message: "已从歌单移除" };
@@ -839,7 +862,10 @@ export async function testNeteaseConnection(baseUrl: string): Promise<{ ok: bool
     try {
         const url = resolveNeteaseRequestBase(baseUrl);
         if (!url) return { ok: false, message: "未配置 API 地址" };
-        const resp = await fetch(withNeteaseParams(`${url}/search?keywords=test&limit=1`), { signal: AbortSignal.timeout(20000) });
+        const resp = await fetch(withNeteaseParams(`${url}/search?keywords=test&limit=1`), {
+            ...(musicFetchInit() as RequestInit | undefined),
+            signal: AbortSignal.timeout(20000),
+        });
         if (!resp.ok) return { ok: false, message: `HTTP ${resp.status}` };
         const data = await resp.json();
         if (data?.result?.songs) return { ok: true, message: "连接成功" };
@@ -947,7 +973,7 @@ export async function getDjSublist(): Promise<NeteaseDjRadio[]> {
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/dj/sublist?timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/dj/sublist?timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return (data?.djRadios || []).map((r: any) => ({
             id: r.id,
@@ -975,7 +1001,7 @@ export async function getDjPrograms(radioId: number, limit = 50): Promise<Neteas
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/dj/program?rid=${radioId}&limit=${limit}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/dj/program?rid=${radioId}&limit=${limit}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return (data?.programs || []).map((p: any) => ({
             id: p.id,
@@ -1002,7 +1028,7 @@ export async function getAlbumSublist(): Promise<NeteaseAlbumSub[]> {
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/album/sublist?timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/album/sublist?timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return (data?.data || []).map((a: any) => ({
             id: a.id,
@@ -1019,7 +1045,7 @@ export async function getAlbumTracks(albumId: number): Promise<NeteaseSearchResu
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/album?id=${albumId}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/album?id=${albumId}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return (data?.songs || []).map(mapSongToSearchResult);
     } catch { return []; }
@@ -1040,7 +1066,7 @@ export async function getUserEvents(limit = 30): Promise<NeteaseUserEvent[]> {
     const uid = await getLoginUid();
     if (!uid) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/user/event?uid=${uid}&limit=${limit}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/user/event?uid=${uid}&limit=${limit}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return (data?.events || []).map((ev: any) => {
             let payload: any = {};
@@ -1062,7 +1088,7 @@ export async function getRecentSongs(limit = 100): Promise<NeteaseSearchResult[]
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/record/recent/song?limit=${limit}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/record/recent/song?limit=${limit}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return (data?.data?.list || []).map((item: any) => mapSongToSearchResult(item.data || {})).filter((s: NeteaseSearchResult) => s.id);
     } catch { return []; }
@@ -1073,7 +1099,7 @@ export async function getIntelligenceList(seedSongId: number, likePlaylistId: nu
     const base = neteaseBase();
     if (!base) return [];
     try {
-        const resp = await fetch(withNeteaseParams(`${base}/playmode/intelligence/list?id=${seedSongId}&pid=${likePlaylistId}&timestamp=${Date.now()}`));
+        const resp = await fetch(withNeteaseParams(`${base}/playmode/intelligence/list?id=${seedSongId}&pid=${likePlaylistId}&timestamp=${Date.now()}`), musicFetchInit());
         const data = await resp.json();
         return (data?.data || []).map((item: any) => mapSongToSearchResult(item.songInfo || {})).filter((s: NeteaseSearchResult) => s.id);
     } catch { return []; }

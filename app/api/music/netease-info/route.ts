@@ -1,42 +1,30 @@
-import { NextResponse } from "next/server";
-import { Agent, fetch as undiciFetch } from "undici";
+import { NextRequest, NextResponse } from "next/server";
+import { fetch as undiciFetch } from "undici";
+
+import {
+    CLIENT_BASE_HEADER,
+    resolveUpstreamBase,
+    upstreamDispatcher,
+} from "@/lib/server/netease-upstream";
 
 /**
- * 网易云代理状态查询：让设置界面能展示服务端实际使用的上游地址，并做一次连通性探测。
- * 上游地址来自服务端环境变量，不暴露给客户端去改写（真正的转发发生在 [...path] 路由里）。
+ * 网易云代理状态查询：让设置界面能展示当前实际使用的上游地址，并做一次连通性探测。
+ *
+ * 上游地址的解析与代理路由共用同一份逻辑（含客户端传入地址的安全校验），
+ * 保证「测试连接」的结论与真实转发一致。
  */
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
-const DEFAULT_UPSTREAM = "http://127.0.0.1:4001";
-
-const ALLOW_INSECURE_UPSTREAM = (process.env.NETEASE_API_INSECURE || "true").trim().toLowerCase() !== "false";
-
-let insecureDispatcher: Agent | null = null;
-function upstreamDispatcher(): Agent | null {
-    if (!ALLOW_INSECURE_UPSTREAM) return null;
-    if (!insecureDispatcher) {
-        insecureDispatcher = new Agent({ connect: { rejectUnauthorized: false } });
-    }
-    return insecureDispatcher;
-}
-
-function resolveUpstreamBase(): string {
-    const raw = process.env.NETEASE_API_BASE
-        || process.env.NEXT_PUBLIC_DEFAULT_NETEASE_API_BASE
-        || DEFAULT_UPSTREAM;
-    return raw.trim().replace(/\/+$/, "");
-}
-
-export async function GET() {
-    const baseUrl = resolveUpstreamBase();
+export async function GET(request: NextRequest) {
+    const baseUrl = resolveUpstreamBase(request.headers.get(CLIENT_BASE_HEADER));
     if (!baseUrl) {
         return NextResponse.json({
             configured: false,
             reachable: false,
             baseUrl: "",
-            message: "未配置上游地址：请在服务端设置 NETEASE_API_BASE。",
+            message: "未拿到上游地址：请在音乐设置里填写 API 地址，或设置服务端 NETEASE_API_BASE。",
         });
     }
 
