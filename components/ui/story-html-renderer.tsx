@@ -474,10 +474,13 @@ function HtmlPageSegment({ html, onOptionSelect, htmlPageMode, serifIframeFallba
             srcDoc={srcDoc}
             title="HTML content"
             // 生成页来自模型输出 / 导入的角色卡，按不可信处理。保留 allow-scripts 是
-            // 因为高度桥接脚本与生成页自带的交互 JS 需要它；allow-same-origin 让
-            // /fonts 等同源资源仍可加载。真正的越权面（读本机 IndexedDB 里的 API 密钥、
-            // 外发数据）由 srcDoc 内的 CSP 与 on* 属性净化共同阻断。
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+            // 因为高度桥接脚本与生成页自带的交互 JS 需要它，但**不给 allow-same-origin**：
+            // 那会让 iframe 与宿主同源，脚本可直接读 window.parent 的 IndexedDB 里的
+            // 明文 LLM API Key 与全部聊天记录 —— CSP 与 on* 净化只挡出网和注入，
+            // 挡不住同源 DOM 读取，所以不能拿它们当作给 allow-same-origin 的理由。
+            // 代价：iframe 是不透明源，/fonts 等同源字体不再加载（回落系统字体）；
+            // 图片不受影响（<img> 无 CORS 限制）。通信走 postMessage + event.source 校验。
+            sandbox="allow-scripts allow-forms allow-popups allow-modals"
             style={{
                 width: "100%",
                 height,
