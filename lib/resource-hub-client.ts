@@ -552,7 +552,11 @@ export async function importResourceHubFile(
                 || (a.resourceHubPath && a.name.trim().toLowerCase() === tagged.name.trim().toLowerCase()));
             let installed;
             if (existing) {
-                installed = { ...tagged, id: existing.id, installedAt: existing.installedAt };
+                // 重复导入（作者更新了资源）：单文件 HTML 的新包只带基础权限，把原 APP
+                // 已有的权限并回去，避免「更新一次把应用功能弄坏」；并集不会多出权限。
+                const mergedPermissions = [...new Set([...existing.permissions, ...tagged.permissions])] as typeof tagged.permissions;
+                const carried = { ...tagged, permissions: mergedPermissions, manifest: { ...tagged.manifest, permissions: mergedPermissions } };
+                installed = { ...carried, id: existing.id, installedAt: existing.installedAt };
                 await saveInstalledCustomAppsAsync([installed, ...apps.filter(a => a.id !== existing.id)]);
             } else {
                 installed = await installCustomAppAsync(tagged);

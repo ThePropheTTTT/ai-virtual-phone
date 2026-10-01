@@ -29,6 +29,7 @@ import {
     generateCustomAppRuntimeId,
     normalizeCustomAppManifestId,
     loadCustomAppPackage,
+    resolveSingleHtmlAppPermissions,
     CUSTOM_APP_PLACE_DESKTOP_EVENT,
 } from "./custom-app-storage";
 import { applyCustomAppRegistrationsAsync, formatCustomAppRegistrationSummary } from "./custom-app-registration";
@@ -205,30 +206,8 @@ const contentGuideTool: QaContentTool = {
 };
 
 // ── 安装自定义 APP ──
-
-const SINGLE_HTML_APP_PERMISSIONS: CustomAppPermission[] = [
-    "app.data.read",
-    "app.data.write",
-    "app.manifest.read",
-    "characters.read",
-    "user.persona.read",
-    "memory.readCore",
-    "memory.readLongTerm",
-    "memory.readShortTerm",
-    "memory.search",
-    "ai.generate",
-    "chat.read",
-    "chat.sendMessage",
-    "chat.sendCard",
-    "chat.requestReply",
-    "chat.contacts.write",
-    "ui.toast",
-    "notifications.read",
-    "notifications.write",
-    "tasks.schedule",
-    "wallet.read",
-    "wallet.pay",
-];
+// 权限不再在这里另抄一份：单文件 HTML 的默认/可授予权限由 custom-app-storage 的
+// resolveSingleHtmlAppPermissions 决定（基础四项必给，其余需用户本人在确认框里勾选）。
 
 const installAppTool: QaContentTool = {
     name: "安装本机应用",
@@ -239,7 +218,7 @@ const installAppTool: QaContentTool = {
             name: { type: "string", description: "应用名（显示在桌面）" },
             html: { type: "string", description: "完整单文件 HTML（含内联 CSS/JS）" },
             description: { type: "string", description: "一句话简介" },
-            permissions: { type: "array", items: { type: "string" }, description: "可选：覆盖默认权限集（如需要 chat.tools 等）。不填用单文件默认权限" },
+            permissions: { type: "array", items: { type: "string" }, description: "可选：请求额外权限。只有用户友好的那部分会被授予；读聊天记录/记忆/钱包、代付款、冒名发消息这类敏感权限不会由你授予，需要用户本人在安装确认框里勾选" },
         },
         required: ["name", "html"],
     },
@@ -250,7 +229,7 @@ const installAppTool: QaContentTool = {
         "    · name (必填) — 应用名（会显示在桌面）",
         "    · html (必填) — 完整单文件 HTML（含内联 CSS/JS）",
         "    · description (可选) — 一句话简介",
-        "    · permissions (可选) — 权限数组，覆盖默认权限集（如 chat.tools）；不填用单文件默认权限",
+        "    · permissions (可选) — 权限数组，只能申请非敏感项；敏感权限需用户本人安装时勾选",
         '  调用：[执行动作:安装本机应用({"name":"番茄钟","html":"<!doctype html>…"})]',
     ],
     async run(args, context) {
@@ -261,11 +240,18 @@ const installAppTool: QaContentTool = {
         const problem = validateGeneratedHtml(html, `应用「${name}」的 HTML`);
         if (problem) return problem;
         const description = text(args.description, 200);
-        // 可选自定义权限：透传字符串，读取时 normalizeInstalledApp 会过滤无效项
+        // 可选自定义权限：透传字符串，由 resolveSingleHtmlAppPermissions 收敛到白名单
         const customPerms = Array.isArray(args.permissions)
             ? ([...new Set(args.permissions.filter((v): v is string => typeof v === "string" && v.length < 60))] as CustomAppPermission[])
             : null;
-        const perms = customPerms?.length ? customPerms : SINGLE_HTML_APP_PERMISSIONS;
+        // 单文件 HTML 没有清单文件，权限只能由宿主代填。敏感项（读聊天记录/记忆/钱包、
+        // 代付款、冒名发消息）不能由模型直接授予 —— 否则等于模型替用户签字。这些一律
+        // 不给，并在返回里如实告诉用户该由谁授权，避免模型换个说法绕过去。
+        const perms = resolveSingleHtmlAppPermissions(customPerms ?? undefined);
+        const withheld = (customPerms ?? []).filter((permission) => !perms.includes(permission));
+        const withheldNote = withheld.length
+            ? `⚠️ 未授予权限：${withheld.join("、")}。这类权限需要用户本人在安装前勾选同意，你不能代签；若应用确实需要，请让用户自己导入这份 HTML 并在确认框里勾选。`
+            : "";
         const now = new Date().toISOString();
 
         const apps = loadInstalledCustomApps();
@@ -273,11 +259,14 @@ const installAppTool: QaContentTool = {
         if (existing) {
             const denial = await denyIfOthersMarketApp(existing, "覆盖");
             if (denial) return `${denial}\n想创建自己的应用请换一个名称。`;
+            // 更新既有 APP 时权限只增不减：保留用户此前已经授权的那些，避免「更新一次
+            // 把应用功能悄悄弄坏」；本次能授予的部分由 perms 决定，不会越过白名单。
+            const mergedPerms = [...new Set([...existing.permissions, ...perms])] as CustomAppPermission[];
             const updated: InstalledCustomApp = {
                 ...existing,
                 entryHtml: html,
-                permissions: customPerms?.length ? perms : existing.permissions,
-                manifest: customPerms?.length ? { ...existing.manifest, permissions: perms } : existing.manifest,
+                permissions: mergedPerms,
+                manifest: { ...existing.manifest, permissions: mergedPerms },
                 description: description || existing.description,
                 // 关联市场版的 APP 被改动：与 UI 编辑/换包一致，标记有未发布改动
                 hasUnpublishedChanges: existing.marketItemId ? true : existing.hasUnpublishedChanges,
@@ -286,7 +275,7 @@ const installAppTool: QaContentTool = {
             await saveInstalledCustomAppsAsync([updated, ...apps.filter((app) => app.id !== existing.id)]);
             context?.onContentCreated?.({ type: "app", refId: existing.id, title: name });
             const linkedNote = existing.marketItemId ? "该 APP 已上架，本地测试卡片会显示「有未发布改动」，用户点「发布」即可提交更新到市场。" : "";
-            return `✓ 已更新本机应用「${name}」（应用数据保留）。${linkedNote}请告诉用户：点输入框旁的预览按钮即可直接打开，或到桌面找「${name}」。`;
+            return `✓ 已更新本机应用「${name}」（应用数据保留）。${linkedNote}${withheldNote}请告诉用户：点输入框旁的预览按钮即可直接打开，或到桌面找「${name}」。`;
         }
 
         const app: InstalledCustomApp = {
@@ -311,7 +300,7 @@ const installAppTool: QaContentTool = {
         // 请求桌面为新应用摆放图标（应用市场安装走同一落位逻辑）
         window.dispatchEvent(new CustomEvent(CUSTOM_APP_PLACE_DESKTOP_EVENT, { detail: { appId: app.id } }));
         context?.onContentCreated?.({ type: "app", refId: app.id, title: name });
-        return `✓ 已安装本机应用「${name}」。请告诉用户：点输入框旁的预览按钮即可直接打开测试；应用图标也已放到桌面，长按可卸载。`;
+        return `✓ 已安装本机应用「${name}」。${withheldNote}请告诉用户：点输入框旁的预览按钮即可直接打开测试；应用图标也已放到桌面，长按可卸载。`;
     },
 };
 

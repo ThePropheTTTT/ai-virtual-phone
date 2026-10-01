@@ -61,6 +61,9 @@ import {
   uninstallCustomAppAsync,
   getCustomAppIconStyle,
   setCustomAppIconStyle,
+  SINGLE_HTML_APP_BASE_PERMISSIONS,
+  SINGLE_HTML_APP_OPTIONAL_PERMISSIONS,
+  resolveSingleHtmlAppPermissions,
   type CustomAppIconStyle,
 } from "@/lib/custom-app-storage";
 import type { CustomAppManifest, CustomAppPermission, CustomAppResourceDeclarations, InstalledCustomApp } from "@/lib/custom-app-types";
@@ -315,6 +318,11 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
   // 漏进本地测试,给非创作者暴露换包/编辑入口
   const [marketReady, setMarketReady] = useState(false);
   const [pendingApp, setPendingApp] = useState<InstalledCustomApp | null>(null);
+  // 单文件 HTML 没有清单，权限只能由用户在安装前勾选。pendingSingleHtml 决定弹窗里
+  // 是「列出包声明的权限」还是「基础权限 + 可选项勾选」。
+  const [pendingSingleHtml, setPendingSingleHtml] = useState(false);
+  const [pendingOptionalPermissions, setPendingOptionalPermissions] = useState<CustomAppPermission[]>([]);
+  const [marketOptionalPermissions, setMarketOptionalPermissions] = useState<CustomAppPermission[]>([]);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [selectedMarketApp, setSelectedMarketApp] = useState<CustomAppMarketItem | null>(null);
   const [selectedInstalledApp, setSelectedInstalledApp] = useState<InstalledCustomApp | null>(null);
@@ -407,6 +415,22 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
   }, [marketApps, query]);
 
   const refresh = () => setApps(loadInstalledCustomApps());
+
+  // 待安装弹窗的唯一入口：顺带重置「是否单文件 HTML」与已勾选的可选权限，
+  // 避免上一份包的勾选串到下一份。直接调用 setPendingApp 会漏掉这次重置。
+  function showPendingApp(app: InstalledCustomApp, options: { singleHtml?: boolean } = {}) {
+    setPendingSingleHtml(options.singleHtml === true);
+    setPendingOptionalPermissions([]);
+    setPendingApp(app);
+  }
+
+  function togglePendingOptionalPermission(permission: CustomAppPermission) {
+    setPendingOptionalPermissions(current => (current.includes(permission) ? current.filter(item => item !== permission) : [...current, permission]));
+  }
+
+  function toggleMarketOptionalPermission(permission: CustomAppPermission) {
+    setMarketOptionalPermissions(current => (current.includes(permission) ? current.filter(item => item !== permission) : [...current, permission]));
+  }
 
   function showErrorDialog(message: unknown, title = "操作失败") {
     const text = message instanceof Error ? message.message : String(message || "请稍后再试。");
@@ -642,7 +666,7 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
     setPublishChangelog("");
     setPublishVersion(linkedItem ? suggestNextVersion(linkedItem.version) : app.version);
     setLocalPublishSource(app);
-    setPendingApp(app);
+    showPendingApp(app);
   }
 
   // 本地测试「换包」：与已发布换包一致，点按钮直接弹系统文件选择器，选完即按原
@@ -657,12 +681,20 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
     setBusy(true);
     try {
       const lower = file.name.toLowerCase();
-      const loaded = lower.endsWith(".html") || lower.endsWith(".htm")
+      const isSingleHtml = lower.endsWith(".html") || lower.endsWith(".htm");
+      const loaded = isSingleHtml
         ? await loadSingleHtmlCustomApp(file)
         : await loadCustomAppPackage(file);
+      // 换包不顺带改权限：单文件 HTML 的新包只带基础权限，把原 APP 已有的权限并回去，
+      // 免得「换一次包把应用功能弄坏」。并集用的是原 APP 已授权的项，不会多出权限。
+      const loadedPermissions = isSingleHtml
+        ? ([...new Set([...target.permissions, ...loaded.permissions])] as CustomAppPermission[])
+        : loaded.permissions;
       const linked = linkedMarketItemFor(target);
       const replaced: InstalledCustomApp = {
         ...loaded,
+        permissions: loadedPermissions,
+        manifest: { ...loaded.manifest, permissions: loadedPermissions },
         id: target.id,
         installedAt: target.installedAt,
         marketItemId: linked?.id ?? target.marketItemId,
@@ -804,10 +836,11 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
     setTab("create");
     try {
       const lower = file.name.toLowerCase();
-      const app = lower.endsWith(".html") || lower.endsWith(".htm")
+      const isSingleHtml = lower.endsWith(".html") || lower.endsWith(".htm");
+      const app = isSingleHtml
         ? await loadSingleHtmlCustomApp(file)
         : await loadCustomAppPackage(file);
-      setPendingApp(app);
+      showPendingApp(app, { singleHtml: isSingleHtml });
       setPublishVersion(app.version);
       return true;
     } catch (err) {
@@ -842,7 +875,15 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
   async function confirmInstall() {
     if (!pendingApp) return;
     setBusy(true);
-    const base = appWithVersion(pendingApp, publishVersion);
+    // 单文件 HTML：以「基础权限 + 用户勾选」覆写包里的权限声明，并同步进 manifest
+    // （运行时按 app.permissions 判权，manifest 那份只用于展示与再次打包）。
+    const declared = pendingSingleHtml
+      ? resolveSingleHtmlAppPermissions(pendingOptionalPermissions)
+      : pendingApp.permissions;
+    const granted = pendingSingleHtml
+      ? { ...pendingApp, permissions: declared, manifest: { ...pendingApp.manifest, permissions: declared } }
+      : pendingApp;
+    const base = appWithVersion(granted, publishVersion);
     // 编辑本地测试 APP 后的"本机测试"是原地替换：沿用原运行时 id 和 installedAt，数据保留
     const app = localEditTarget ? { ...base, id: localEditTarget.id, installedAt: localEditTarget.installedAt } : base;
     const installed = await installApp(app);
@@ -960,7 +1001,7 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
     setMarketBusy(true);
     setMarketError("");
     try {
-      const app = await loadCustomAppMarketPackageApp(item);
+      const app = await loadCustomAppMarketPackageApp(item, { permissions: marketOptionalPermissions });
       const installed = await installApp(app);
       if (installed) {
         await recordCustomAppInstall(item.id);
@@ -1137,11 +1178,17 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
                     const installed = installedForMarketItem(item);
                     return (
                       <article className="am-list-row" key={item.id}>
-                        <button type="button" className="am-list-icon-btn" onClick={() => setSelectedMarketApp(item)} aria-label={`${item.name} 详情`}>
+                        <button type="button" className="am-list-icon-btn" onClick={() => {
+                          setMarketOptionalPermissions([]);
+                          setSelectedMarketApp(item);
+                        }} aria-label={`${item.name} 详情`}>
                           <AppIcon iconDataUrl={item.iconDataUrl} seed={item.name} className="list" />
                         </button>
                         <div className="am-list-col">
-                          <button type="button" className="am-list-text" onClick={() => setSelectedMarketApp(item)}>
+                          <button type="button" className="am-list-text" onClick={() => {
+                            setMarketOptionalPermissions([]);
+                            setSelectedMarketApp(item);
+                          }}>
                             <span className="am-list-name-row">
                               <strong>{item.name}</strong>
                               <span className="am-list-author">{item.authorName}</span>
@@ -1359,7 +1406,7 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
               </div>
 
               <div className="app-market-inspection-grid">
-                <div><strong>{pendingApp.permissions.length}</strong><span>权限</span></div>
+                <div><strong>{pendingSingleHtml ? SINGLE_HTML_APP_BASE_PERMISSIONS.length + pendingOptionalPermissions.length : pendingApp.permissions.length}</strong><span>权限</span></div>
                 <div><strong>{declarationCount(pendingApp)}</strong><span>声明文件</span></div>
                 <div><strong>{sourceFile ? formatPackageSize(sourceFile.size) : "未知"}</strong><span>包大小</span></div>
               </div>
@@ -1377,18 +1424,26 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
                 })}
               </div>
 
-              <div className="app-market-permissions">
-                <span>请求权限</span>
-                {pendingApp.permissions.length === 0 ? (
-                  <p>未声明特殊权限，仅作为页面运行。</p>
-                ) : (
-                  <ul>
-                    {pendingApp.permissions.map(permission => (
-                      <li key={permission}>{permissionLabelWithContext(permission, pendingApp.manifest)}</li>
-                    ))}
-                  </ul>
-                )}
-              </div>
+              {pendingSingleHtml ? (
+                <SingleHtmlPermissionPicker
+                  selected={pendingOptionalPermissions}
+                  onToggle={togglePendingOptionalPermission}
+                  manifest={pendingApp.manifest}
+                />
+              ) : (
+                <div className="app-market-permissions">
+                  <span>请求权限</span>
+                  {pendingApp.permissions.length === 0 ? (
+                    <p>未声明特殊权限，仅作为页面运行。</p>
+                  ) : (
+                    <ul>
+                      {pendingApp.permissions.map(permission => (
+                        <li key={permission}>{permissionLabelWithContext(permission, pendingApp.manifest)}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
 
               {sourceFile ? <p className="app-market-upload-hint">文件：{sourceFile.name}</p> : null}
 
@@ -1454,18 +1509,26 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
                   <p>{selectedMarketApp.changelog}</p>
                 </div>
               ) : null}
-              <div className="app-market-permissions">
-                <span>权限说明</span>
-                {selectedMarketApp.permissions.length === 0 ? (
-                  <p>未声明特殊权限。</p>
-                ) : (
-                  <ul>
-                    {selectedMarketApp.permissions.map(permission => (
-                      <li key={permission}>{permissionLabelWithContext(permission, selectedMarketApp.manifest)}</li>
-                    ))}
-                  </ul>
-                )}
-              </div>
+              {selectedMarketApp.packageKind === "html" ? (
+                <SingleHtmlPermissionPicker
+                  selected={marketOptionalPermissions}
+                  onToggle={toggleMarketOptionalPermission}
+                  manifest={selectedMarketApp.manifest}
+                />
+              ) : (
+                <div className="app-market-permissions">
+                  <span>权限说明</span>
+                  {selectedMarketApp.permissions.length === 0 ? (
+                    <p>未声明特殊权限。</p>
+                  ) : (
+                    <ul>
+                      {selectedMarketApp.permissions.map(permission => (
+                        <li key={permission}>{permissionLabelWithContext(permission, selectedMarketApp.manifest)}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
               <div className="app-market-sheet-actions with-report">
                 <button type="button" className="app-market-secondary" onClick={() => setSelectedMarketApp(null)}>关闭</button>
                 {installedForMarketItem(selectedMarketApp) ? (
@@ -1882,6 +1945,43 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
           </div>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+// 单文件 HTML 应用没有清单文件，权限只能由宿主代填 —— 所以这里把「基础权限」与
+// 「可选项」分开：基础项不给就装不成应用，可选项会读私密数据（聊天记录、记忆、
+// 钱包）或替用户花钱、冒名发消息，必须逐项勾上才授予。
+function SingleHtmlPermissionPicker({
+  selected,
+  onToggle,
+  manifest,
+}: {
+  selected: CustomAppPermission[];
+  onToggle: (permission: CustomAppPermission) => void;
+  manifest: CustomAppManifest | undefined;
+}) {
+  return (
+    <div className="app-market-permissions">
+      <span>权限（单文件 HTML 没有清单文件，就在这一步授权）</span>
+      <p className="app-market-upload-hint">
+        基础权限默认授予：{SINGLE_HTML_APP_BASE_PERMISSIONS.map(permission => permissionLabelWithContext(permission, manifest)).join("、")}
+      </p>
+      <ul>
+        {SINGLE_HTML_APP_OPTIONAL_PERMISSIONS.map(permission => (
+          <li key={permission}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={selected.includes(permission)}
+                onChange={() => onToggle(permission)}
+              />
+              <span>{permissionLabelWithContext(permission, manifest)}</span>
+            </label>
+          </li>
+        ))}
+      </ul>
+      <p className="app-market-upload-hint">没勾的权限它拿不到；以后需要，卸载重装再勾一次即可。</p>
     </div>
   );
 }

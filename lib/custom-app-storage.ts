@@ -1110,33 +1110,73 @@ export async function loadCustomAppPackage(file: File): Promise<InstalledCustomA
   };
 }
 
-export async function loadSingleHtmlCustomApp(file: File): Promise<InstalledCustomApp> {
+/**
+ * 单文件 HTML 应用的基础权限：装进来就有的那一档。
+ *
+ * 单文件 HTML 没有 manifest，权限只能由宿主代填。此前的做法是把 21 项一次性全给，
+ * 其中包含 `wallet.pay`（从用户钱包扣款）、`chat.read`（读取全部聊天记录）、
+ * `chat.sendMessage`（以用户身份发消息）、`notifications.write`、`tasks.schedule`。
+ * 结果是任何一份从别处拿到的 HTML 文件、或应用广场上一个单文件 HTML 包，装进来就
+ * 同时拿到「读光聊天记录 + 花用户的钱 + 冒名发消息」，而这一切在安装前没有被单独问过。
+ *
+ * 现在只默认给「不给就装不成应用、给了也作不了恶」的四项，其余移入
+ * SINGLE_HTML_APP_OPTIONAL_PERMISSIONS，由用户在导入确认框里逐项勾选。
+ */
+export const SINGLE_HTML_APP_BASE_PERMISSIONS: CustomAppPermission[] = [
+  "app.data.read",
+  "app.data.write",
+  "app.manifest.read",
+  "ui.toast",
+];
+
+/** 单文件 HTML 应用里需要用户显式勾选才会授予的权限（会读私密数据、花钱、冒名发消息的那些）。 */
+export const SINGLE_HTML_APP_OPTIONAL_PERMISSIONS: CustomAppPermission[] = [
+  "characters.read",
+  "user.persona.read",
+  "memory.readCore",
+  "memory.readLongTerm",
+  "memory.readShortTerm",
+  "memory.search",
+  "ai.generate",
+  "chat.read",
+  "chat.sendMessage",
+  "chat.sendCard",
+  "chat.requestReply",
+  "chat.contacts.write",
+  "notifications.read",
+  "notifications.write",
+  "tasks.schedule",
+  "wallet.read",
+  "wallet.pay",
+];
+
+/**
+ * 把「请求的权限」收敛成单文件 HTML 应用真正能拿到的权限集合。
+ * 可选项目只能从此白名单里勾 —— 传进来别的（拼错的、manifest 里编的）一律丢弃，
+ * 所以调用方即使把用户的勾选原样透传也不会有越权面。
+ */
+export function resolveSingleHtmlAppPermissions(requested?: readonly string[]): CustomAppPermission[] {
+  const picked = new Set<string>(SINGLE_HTML_APP_BASE_PERMISSIONS);
+  if (requested) {
+    for (const permission of requested) {
+      if (SINGLE_HTML_APP_OPTIONAL_PERMISSIONS.includes(permission as CustomAppPermission)) {
+        picked.add(permission);
+      }
+    }
+  }
+  return SINGLE_HTML_APP_BASE_PERMISSIONS.concat(
+    SINGLE_HTML_APP_OPTIONAL_PERMISSIONS.filter(permission => picked.has(permission)),
+  );
+}
+
+export async function loadSingleHtmlCustomApp(
+  file: File,
+  options: { permissions?: readonly string[] } = {},
+): Promise<InstalledCustomApp> {
   const entryHtml = cleanText(await file.text(), MAX_TEXT_LENGTH);
   const name = file.name.replace(/\.[^.]+$/, "") || "自定义 APP";
   const id = generateCustomAppRuntimeId(name);
-  const permissions: CustomAppPermission[] = [
-    "app.data.read",
-    "app.data.write",
-    "app.manifest.read",
-    "characters.read",
-    "user.persona.read",
-    "memory.readCore",
-    "memory.readLongTerm",
-    "memory.readShortTerm",
-    "memory.search",
-    "ai.generate",
-    "chat.read",
-    "chat.sendMessage",
-    "chat.sendCard",
-    "chat.requestReply",
-    "chat.contacts.write",
-    "ui.toast",
-    "notifications.read",
-    "notifications.write",
-    "tasks.schedule",
-    "wallet.read",
-    "wallet.pay",
-  ];
+  const permissions = resolveSingleHtmlAppPermissions(options.permissions);
   return {
     id,
     name,
