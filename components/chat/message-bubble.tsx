@@ -300,8 +300,12 @@ function HtmlFullscreenModal({ html, onClose, onActionSelect }: { html: string; 
                 ref={iframeRef}
                 srcDoc={srcDoc}
                 onClick={(e) => e.stopPropagation()}
-                // 同 HtmlPreviewCard：沙箱 + srcDoc CSP 双向限制生成页
-                sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+                // 同 HtmlPreviewCard：沙箱 + srcDoc CSP 双向限制生成页。
+                // 不给 allow-same-origin —— 一旦给了，iframe 就是同源文档，其内部脚本
+                // 可以直接读 window.parent 的 IndexedDB（明文 LLM API Key、全部聊天记录）。
+                // CSP 挡的是「出网」，挡不住「同源读取」，所以这里不能靠 CSP 兜底。
+                // 宿主与 iframe 的通信只用 postMessage，且都校验了 event.source。
+                sandbox="allow-scripts allow-forms allow-popups allow-modals"
             />
         </div>,
         portalTarget
@@ -380,10 +384,13 @@ function ChatHtmlInlineFrame({
                 className="chat-html-inline-frame"
                 srcDoc={srcDoc}
                 title="AI 生成互动内容"
-                // 生成页来自模型输出 / 导入的角色卡。allow-same-origin 让同源字体与
-                // data: 图片仍可加载；越权面（读本机 API 密钥、外发数据）由 srcDoc
-                // 内的 CSP 阻断，iframe 也只能通过已被 source 校验的 postMessage 回话。
-                sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+                // 生成页来自模型输出 / 导入的角色卡，按不可信处理。保留 allow-scripts 是
+                // 因为生成页自带的交互 JS 需要它，但**不给 allow-same-origin**：那会让
+                // iframe 与宿主同源，脚本可直接读 window.parent 的 IndexedDB（明文 LLM
+                // API Key、全部聊天记录）——CSP 只挡出网，挡不住同源读取，不能作为理由。
+                // 代价是 iframe 变成不透明源：/fonts 等同源字体不再能加载（回落到系统字体），
+                // 图片仍正常显示（<img> 不受 CORS 限制）。通信全部走 postMessage + source 校验。
+                sandbox="allow-scripts allow-forms allow-popups allow-modals"
                 style={{ height }}
             />
             {allowFullscreen ? (

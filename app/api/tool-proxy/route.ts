@@ -116,6 +116,62 @@ async function blockedProxyUrlReasonWithDns(rawUrl: string): Promise<string | nu
 }
 
 /**
+ * 跟随重定向必须逐跳复检，否则上面的内网防线等于没有。
+ *
+ * `redirect: "follow"` 的跳转是 undici / fetch **内部**完成的，我们只看得到
+ * 第一个 URL —— 攻击者用自己控制的公网域名返回 `302 location:
+ * http://169.254.169.254/latest/meta-data/`（或 `http://127.0.0.1:4000/`），
+ * 第一跳是合法的公网地址因此放行，实际请求却打在内网（本机 Node 24 实测：
+ * 两种 fetch 在未显式设置 redirect 时都会跨源跟随 302）。所以这里改用
+ * `redirect: "manual"` 自己循环，**每一跳都跑一次 blockedProxyUrlReasonWithDns**。
+ */
+const MAX_PROXY_REDIRECTS = 5;
+
+type ProxyFetch = (url: string, init: RequestInit) => Promise<Response>;
+
+async function fetchFollowingCheckedRedirects(
+    doFetch: ProxyFetch,
+    startUrl: string,
+    init: RequestInit,
+): Promise<Response> {
+    let currentUrl = startUrl;
+    let method = init.method || "GET";
+    let body = init.body;
+
+    for (let hop = 0; ; hop++) {
+        const res = await doFetch(currentUrl, { ...init, method, body, redirect: "manual" });
+        const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+        if (!location) return res;
+
+        // 丢弃这一跳的响应体，避免连接泄漏
+        await res.body?.cancel().catch(() => undefined);
+
+        if (hop >= MAX_PROXY_REDIRECTS) {
+            throw new Error(`重定向次数超过 ${MAX_PROXY_REDIRECTS} 次`);
+        }
+
+        let nextUrl: string;
+        try {
+            nextUrl = new URL(location, currentUrl).toString();
+        } catch {
+            throw new Error("重定向目标 URL 不合法");
+        }
+
+        const blockedReason = await blockedProxyUrlReasonWithDns(nextUrl);
+        if (blockedReason) {
+            throw new Error(`重定向目标被拒绝（第 ${hop + 1} 跳）：${blockedReason}`);
+        }
+
+        // 与 fetch 的 follow 语义保持一致：303，以及 301/302 对非 GET/HEAD 的请求，都退化成 GET
+        if (res.status === 303 || ((res.status === 301 || res.status === 302) && method !== "GET" && method !== "HEAD")) {
+            method = "GET";
+            body = undefined;
+        }
+        currentUrl = nextUrl;
+    }
+}
+
+/**
  * Server-side proxy for external tool/MCP requests.
  * Bypasses browser CORS restrictions.
  *
@@ -178,16 +234,21 @@ export async function POST(req: NextRequest) {
         const timeout = setTimeout(() => controller.abort(), proxyTimeoutMs);
         const dispatcher = getProxyDispatcher();
 
-        const res = await (dispatcher
-            ? undiciFetch(fetchUrl, {
-                method: fetchOptions.method || "POST",
-                headers: fetchHeaders,
-                body: fetchOptions.body as string | undefined,
-                signal: controller.signal,
+        const doFetch: ProxyFetch = (targetUrl, init) => (dispatcher
+            ? undiciFetch(targetUrl, {
+                method: init.method,
+                headers: init.headers as Record<string, string>,
+                body: init.body as string | undefined,
+                signal: init.signal ?? undefined,
+                redirect: init.redirect,
                 dispatcher,
-            }) as unknown as Response
-            : fetch(fetchUrl, { ...fetchOptions, signal: controller.signal })
-        );
+            }) as unknown as Promise<Response>
+            : fetch(targetUrl, init));
+
+        const res = await fetchFollowingCheckedRedirects(doFetch, fetchUrl, {
+            ...fetchOptions,
+            signal: controller.signal,
+        });
         clearTimeout(timeout);
 
         // Forward response headers we care about
