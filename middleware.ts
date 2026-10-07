@@ -107,10 +107,48 @@ async function handleSelfHostedRequest(request: NextRequest, pathname: string): 
   return NextResponse.next();
 }
 
-/** 换到 cookie 之后把地址栏里的 ?k= 去掉，免得密钥留在浏览历史与 Referer 里。 */
+function firstHeaderValue(value: string | null): string {
+  return (value ?? "").split(",")[0].trim();
+}
+
+/**
+ * 还原用户真正访问的地址来源。
+ *
+ * 自定义服务器（scripts/local-next-server.mjs）接在 nginx 后面时，`request.nextUrl`
+ * 指向的是内网监听地址（实测直接拿它做重定向会给出 https://localhost:3001/），而
+ * nginx 的 `proxy_set_header Host $host` 又会把公网端口 8443 剥掉。所以只能自己拼：
+ * 协议取 X-Forwarded-Proto，主机取 X-Forwarded-Host（带端口）→ Host，端口缺失时再补
+ * X-Forwarded-Port。这几个头都由 nginx 覆写，客户端自带的会被顶掉。
+ */
+function resolvePublicOrigin(request: NextRequest): string | null {
+  const host = firstHeaderValue(request.headers.get("x-forwarded-host")) || firstHeaderValue(request.headers.get("host"));
+  if (!host) return null;
+
+  const proto = firstHeaderValue(request.headers.get("x-forwarded-proto")) || request.nextUrl.protocol.replace(":", "") || "http";
+  const port = firstHeaderValue(request.headers.get("x-forwarded-port"));
+  const isDefaultPort = (proto === "https" && port === "443") || (proto === "http" && port === "80");
+  const authority = port && !isDefaultPort && !/:\d+$/.test(host) ? `${host}:${port}` : host;
+
+  return `${proto}://${authority}`;
+}
+
+/**
+ * 换到 cookie 之后把地址栏里的 ?k= 去掉，免得密钥留在浏览历史与 Referer 里。
+ *
+ * 重定向必须是绝对地址（相对地址会被 Next 服务器以 `TypeError: Invalid URL` 打成 500），
+ * 所以用 resolvePublicOrigin 拼出用户那一侧的地址；拼不出来时才退回 request.nextUrl。
+ */
 function stripSelfHostedKeyParam(request: NextRequest): NextResponse {
   const url = request.nextUrl.clone();
   url.searchParams.delete(SELF_HOSTED_KEY_QUERY_PARAM);
+  const origin = resolvePublicOrigin(request);
+  if (origin) {
+    try {
+      return NextResponse.redirect(new URL(`${url.pathname}${url.search}`, origin));
+    } catch {
+      // origin 拼坏了就落回下面那条路，别让整页 500。
+    }
+  }
   return NextResponse.redirect(url);
 }
 
