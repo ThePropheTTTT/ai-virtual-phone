@@ -1,4 +1,4 @@
-const encoder = new TextEncoder();
+import { hmacSha256 } from "./crypto-hmac";
 
 function getGateSecret(): string {
   return (
@@ -8,25 +8,6 @@ function getGateSecret(): string {
     process.env.NEXTAUTH_SECRET ||
     ""
   ).trim();
-}
-
-function bytesToBase64Url(bytes: ArrayBuffer): string {
-  const array = new Uint8Array(bytes);
-  let binary = "";
-  for (const byte of array) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
-async function hmacSha256(input: string, secret: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(input));
-  return bytesToBase64Url(signature);
 }
 
 export async function createAccountGateCookieValue(
