@@ -642,7 +642,7 @@ export function PhoneThemeApp({
 
 type ColorItem = { key: string; label: string; defaultValue: string };
 const COLOR_ITEMS: ColorItem[] = [
-  { key: "--c-header-bg", label: "标题栏", defaultValue: "#FFFFFF" },
+  { key: "--c-header-bg", label: "标题栏", defaultValue: "#F1F2F6" },
   { key: "--c-page-body-bg", label: "内容区", defaultValue: "#F1F2F6" },
   { key: "--c-card", label: "卡片", defaultValue: "rgba(255, 255, 255, 0.7)" },
   { key: "--c-card-border", label: "卡片边框", defaultValue: "#E0E0E0" },

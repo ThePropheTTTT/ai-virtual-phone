@@ -1146,9 +1146,19 @@
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
-  background: color-mix(in srgb, var(--c-header-bg, var(--c-page-body-bg)) 55%, transparent);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  /* 顶栏默认不再自带底色和毛玻璃。原来的两条是：
+       background: color-mix(in srgb, var(--c-header-bg, var(--c-page-body-bg)) 55%, transparent);
+       backdrop-filter: blur(20px) saturate(180%);
+     而 --c-header-bg 默认是纯白，于是正文一滚到顶栏下面就被「55% 白 + 20px 模糊」糊成一片白 ——
+     每个页面顶端都会出现一条白色渐变，深色页面更是一条刺眼的白带
+     （styles/checkphone.css:311-317 与 styles/chat.css:6422-6427 两处历史补丁就是在给个别页面擦这个屁股）。
+     现在顶栏完全透明：标题直接浮在内容上，滚过去的内容不再被糊、也不会发白。
+     想让标题栏重新有底色/毛玻璃，在「主题 → 自定义 CSS」里写回：
+       .page-header {
+         background: color-mix(in srgb, var(--c-header-bg) 55%, transparent);
+         backdrop-filter: blur(20px) saturate(180%);
+         -webkit-backdrop-filter: blur(20px) saturate(180%);
+       } */
 }
 
 .page-header-safe-area {

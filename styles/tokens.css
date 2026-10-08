@@ -5,8 +5,10 @@
      ═══════════════════════════════════════════ */
 
   /* ── 核心 16 色 ── */
-  --c-header-bg: #FFFFFF;
-  /* 标题栏底色 */
+  --c-header-bg: #F1F2F6;
+  /* 标题栏底色。默认与 --c-page-body-bg 同值：.page-header 是「本底色 55% + blur(20px)」，
+     底色若用纯白，每个页面顶端都会压出一条白带（深色页面尤其刺眼）。
+     想要白色标题栏，在自定义 CSS 里写 --c-header-bg: #FFFFFF 即可恢复。 */
   --c-page-body-bg: #F1F2F6;
   /* 页面内容区底色 */
   --c-card: rgba(255, 255, 255, 0.7);
@@ -248,7 +250,7 @@
    用户可通过聊天页面 CSS 编辑器覆盖
    ═══════════════════════════════════════════ */
 .chat-app {
-  --c-header-bg: #FFFFFF;
+  --c-header-bg: #FAFAFA;
   --c-page-body-bg: #FAFAFA;
   --c-card: #FFFFFF;
   --c-card-border: #F0F0F0;
