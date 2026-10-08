@@ -82,7 +82,7 @@ export type ThemeProfile = {
    .chat-html-inline-expand — fullscreen button for inline HTML
 
    ── 核心 16 色（通过 cssOverrides 或 globalCustomCSS 覆盖） ──
-   --c-header-bg     : 标题栏底色 (#FFFFFF)
+   --c-header-bg     : 标题栏底色 (#F1F2F6，默认与 --c-page-body-bg 同值)
    --c-page-body-bg  : 页面内容区底色 (#F1F2F6)
    --c-card          : 选项卡片底色 (rgba(255, 255, 255, 0.7))
    --c-card-border   : 选项卡片边框 (#E0E0E0)

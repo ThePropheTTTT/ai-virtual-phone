@@ -7,7 +7,7 @@ export const CHAT_SESSION_CSS_EXAMPLE = `/* ═══ 单独聊天室 CSS 示例
 
 /* ── 颜色变量 ── */
 :root {
-  --c-header-bg: #FFFFFF;         /* 标题栏底色 */
+  --c-header-bg: #FAFAFA;         /* 标题栏底色（默认与消息区同色，顶栏才不会有白带） */
   --c-page-body-bg: #FAFAFA;      /* 消息区底色 */
 
   --c-bubble-self: var(--c-action-blue, #246bfd); /* 我的气泡 */
@@ -601,7 +601,7 @@ export const CHAT_APP_CSS_EXAMPLE = `/* ═══ 聊天应用 CSS 示例 ══
    1. 颜色变量
    ══════════════════════════ */
 .chat-app {
-  --c-header-bg: #FFFFFF;         /* 标题栏底色 */
+  --c-header-bg: #FAFAFA;         /* 标题栏底色（默认与内容区同色，顶栏才不会有白带） */
   --c-page-body-bg: #FAFAFA;      /* 内容区底色 */
 
   --c-bubble-self: var(--c-action-blue, #246bfd); /* 我的气泡 */
