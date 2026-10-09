@@ -1058,10 +1058,11 @@
 
 @media (max-width: 500px) and (hover: none) and (pointer: coarse) {
 
-  /* 用户在设置里显式开启「显示系统状态栏」且运行时不在全屏时，控制器才会挂
-     data-pwa-display-mode 标记（见 pwa-manifest-injector）：此时所有 App 共用系统
-     安全区，不再重复预留 48px 虚拟状态栏。未开启开关的用户（含 iOS 装机用户，
-     iOS 永远报 standalone）不受影响，保持沉浸外观。 */
+  /* 只要运行时是独立窗口 / 最小 UI（标记由 components/pwa-manifest-injector.tsx 挂），
+     顶上那条系统状态栏就是真实存在且不透明的，所有 App 共用系统安全区、
+     不再重复预留 48px 虚拟状态栏。以前只在用户显式开了「显示系统状态栏」时才这么干，
+     但 iOS 现在固定用 apple-mobile-web-app-status-bar-style: default（内容在状态栏下面），
+     再自留 48px 就会整页往下移、底部还被切掉点不到。fullscreen 不挂标记，保持沉浸外观。 */
   html[data-pwa-display-mode="standalone"] .phone-shell,
   html[data-pwa-display-mode="minimal-ui"] .phone-shell,
   html[data-pwa-display-mode="browser"] .phone-shell {
@@ -1105,6 +1106,25 @@
     align-items: flex-start;
     overflow: hidden;
     background: var(--c-page-body-bg);
+  }
+
+  /* 系统状态栏可见时（独立窗口 / 最小 UI），按「动态视口高」量页面：
+     这类浏览器里 100lvh 仍是整屏高（含被状态栏吃掉的那一条），照它排版会多出一截，
+     缩放后底部那截跑到屏幕外 —— 底部栏就在那儿，按不到。dvh 跟着当前可视高度走，不会多。 */
+  html[data-pwa-display-mode="standalone"],
+  html[data-pwa-display-mode="minimal-ui"],
+  html[data-pwa-display-mode="browser"] {
+    --phone-screen-height: 100dvh;
+    height: 100dvh;
+  }
+
+  html[data-pwa-display-mode="standalone"] body,
+  html[data-pwa-display-mode="minimal-ui"] body,
+  html[data-pwa-display-mode="browser"] body,
+  html[data-pwa-display-mode="standalone"] .app-root,
+  html[data-pwa-display-mode="minimal-ui"] .app-root,
+  html[data-pwa-display-mode="browser"] .app-root {
+    height: 100dvh;
   }
 
   .phone-shell-wrap {
